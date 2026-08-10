@@ -5489,7 +5489,7 @@ with tab2:
     report_date_str = report_date.strftime("%Y-%m-%d") if report_date else ""
 
     # --- 报表选择 ---
-    report_type = st.radio("选择报表", ["资产负债表", "利润表", "现金流量表"], horizontal=True)
+    report_type = st.radio("选择报表", ["资产负债表", "利润表", "现金流量表", "📊 财务可视化分析"], horizontal=True)
 
     # ================================================================
     # 资产负债表
@@ -6245,6 +6245,357 @@ with tab2:
             file_name=f"现金流量表_{report_date_str or '未定'}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
+
+    # ================================================================
+    # 财务可视化分析
+    # ================================================================
+    elif report_type == "📊 财务可视化分析":
+        import plotly.express as px
+        import plotly.graph_objects as go
+        from plotly.subplots import make_subplots
+
+        st.markdown("---")
+        st.markdown(
+            '<div style="text-align:center; font-size:22px; font-weight:700; '
+            'padding:12px 0;">📊 财务可视化分析</div>',
+            unsafe_allow_html=True,
+        )
+        st.caption("基于当前账套数据自动生成可视化图表，涵盖资产结构、损益分析、费用构成、收支趋势等。")
+
+        # 清除缓存确保数据最新
+        calc_account_balance.clear()
+        get_all_opening_balances.clear()
+        get_all_vouchers.clear()
+
+        # -------- 辅助函数：获取科目余额 --------
+        def _get_balance(code):
+            _, _, _, _, ending = calc_account_balance(code)
+            return ending
+
+        def _get_balance_list(codes):
+            return sum(_get_balance(c) for c in codes)
+
+        # -------- 收集各类数据 --------
+        # 资产类明细
+        asset_data = []
+        for a in ACCOUNT_CHART:
+            if a["category"] != "资产":
+                continue
+            bal = _get_balance(a["code"])
+            if abs(bal) > 0.01:
+                asset_data.append({"科目": a["name"], "编码": a["code"], "余额": abs(bal)})
+
+        # 负债类明细
+        liab_data = []
+        for a in ACCOUNT_CHART:
+            if a["category"] != "负债":
+                continue
+            bal = _get_balance(a["code"])
+            if abs(bal) > 0.01:
+                liab_data.append({"科目": a["name"], "编码": a["code"], "余额": abs(bal)})
+
+        # 权益类明细
+        equity_data = []
+        for a in ACCOUNT_CHART:
+            if a["category"] != "权益":
+                continue
+            bal = _get_balance(a["code"])
+            if abs(bal) > 0.01:
+                equity_data.append({"科目": a["name"], "编码": a["code"], "余额": abs(bal)})
+
+        # 损益类数据
+        income_total = _get_balance_list(["6001", "6021", "6041", "6051", "6101", "6102", "6103",
+                                          "6111", "6115", "6117", "6301"])
+        expense_total = _get_balance_list(["6401", "6402", "6403", "6405",
+                                           "6601", "6602", "6603", "6604", "6605", "6606",
+                                           "6641", "6642", "6701", "6711"])
+
+        # 费用明细
+        expense_items = []
+        for code, name in [("6401", "主营业务成本"), ("6402", "其他业务成本"),
+                           ("6403", "税金及附加"), ("6601", "销售费用"),
+                           ("6602", "管理费用"), ("6603", "财务费用"),
+                           ("6641", "信用减值损失"), ("6642", "资产减值损失"),
+                           ("6701", "营业外支出"), ("6711", "所得税费用")]:
+            bal = _get_balance(code)
+            if abs(bal) > 0.01:
+                expense_items.append({"科目": name, "编码": code, "金额": abs(bal)})
+
+        # 收入明细
+        income_items = []
+        for code, name in [("6001", "主营业务收入"), ("6051", "其他业务收入"),
+                            ("6111", "投资收益"), ("6117", "其他收益"),
+                            ("6301", "营业外收入"), ("6101", "公允价值变动损益")]:
+            bal = _get_balance(code)
+            if abs(bal) > 0.01:
+                income_items.append({"科目": name, "编码": code, "金额": abs(bal)})
+
+        # 月度凭证数据（用于趋势图）
+        all_vouchers_df = get_all_vouchers()
+        if not all_vouchers_df.empty and "voucher_date" in all_vouchers_df.columns:
+            all_vouchers_df["voucher_date"] = pd.to_datetime(all_vouchers_df["voucher_date"], errors="coerce")
+            all_vouchers_df["月份"] = all_vouchers_df["voucher_date"].dt.to_period("M").astype(str)
+            monthly_data = all_vouchers_df.groupby("月份").agg(
+                借方合计=("debit_amount", "sum"),
+                贷方合计=("credit_amount", "sum"),
+            ).reset_index()
+        else:
+            monthly_data = pd.DataFrame(columns=["月份", "借方合计", "贷方合计"])
+
+        # ============================================================
+        # 图表区域
+        # ============================================================
+        # --- 核心指标卡片 ---
+        asset_total = sum(d["余额"] for d in asset_data)
+        liab_total = sum(d["余额"] for d in liab_data)
+        equity_total = sum(d["余额"] for d in equity_data)
+        net_profit = income_total - expense_total
+
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("总资产", fmt_money(asset_total))
+        m2.metric("总负债", fmt_money(liab_total))
+        m3.metric("所有者权益", fmt_money(equity_total))
+        m4.metric("本期净利润", fmt_money(abs(net_profit)),
+                  delta=f"{'盈利' if net_profit > 0 else '亏损'}" if net_profit != 0 else "持平")
+
+        # 负债率
+        if asset_total > 0:
+            debt_ratio = liab_total / asset_total * 100
+            st.info(f"📌 资产负债率：{debt_ratio:.1f}%  |  权益比率：{(equity_total / asset_total * 100) if asset_total else 0:.1f}%")
+
+        st.markdown("---")
+
+        # --- 子标签页 ---
+        viz_sub1, viz_sub2, viz_sub3, viz_sub4 = st.tabs([
+            "🏗️ 资产结构", "💰 损益分析", "📈 收支趋势", "📊 费用构成",
+        ])
+
+        # ===== 1. 资产结构 =====
+        with viz_sub1:
+            if asset_data:
+                c1, c2 = st.columns(2)
+
+                with c1:
+                    # 资产构成饼图
+                    fig_asset = px.pie(
+                        asset_data, values="余额", names="科目",
+                        title="资产构成",
+                        color_discrete_sequence=px.colors.qualitative.Set2,
+                    )
+                    fig_asset.update_traces(textposition="inside", textinfo="label+percent")
+                    fig_asset.update_layout(showlegend=False, height=400)
+                    st.plotly_chart(fig_asset, use_container_width=True)
+
+                with c2:
+                    # 负债与权益对比
+                    struct_data = [
+                        {"类别": "负债", "金额": liab_total},
+                        {"类别": "所有者权益", "金额": equity_total},
+                    ]
+                    fig_struct = px.pie(
+                        struct_data, values="金额", names="类别",
+                        title="负债与权益结构",
+                        color="类别",
+                        color_discrete_map={"负债": "#ef5350", "所有者权益": "#42a5f5"},
+                    )
+                    fig_struct.update_traces(textposition="inside", textinfo="label+percent")
+                    fig_struct.update_layout(height=400)
+                    st.plotly_chart(fig_struct, use_container_width=True)
+
+                # 资产 TOP 10 柱状图
+                if len(asset_data) > 1:
+                    top_assets = sorted(asset_data, key=lambda x: x["余额"], reverse=True)[:10]
+                    fig_bar = px.bar(
+                        top_assets, x="余额", y="科目", orientation="h",
+                        title="资产科目 TOP 10",
+                        color="余额", color_continuous_scale="Blues",
+                    )
+                    fig_bar.update_layout(yaxis={"categoryorder": "total ascending"}, height=400)
+                    st.plotly_chart(fig_bar, use_container_width=True)
+
+                # 负债明细
+                if liab_data:
+                    fig_liab = px.bar(
+                        liab_data, x="余额", y="科目", orientation="h",
+                        title="负债明细",
+                        color_discrete_sequence=["#ef5350"],
+                    )
+                    fig_liab.update_layout(yaxis={"categoryorder": "total ascending"}, height=350)
+                    st.plotly_chart(fig_liab, use_container_width=True)
+            else:
+                st.info("暂无资产数据，请先录入凭证或期初余额。")
+
+        # ===== 2. 损益分析 =====
+        with viz_sub2:
+            # 收入 vs 费用对比
+            if income_total > 0 or expense_total > 0:
+                ie_data = pd.DataFrame({
+                    "类别": ["收入合计", "费用合计"],
+                    "金额": [income_total, expense_total],
+                })
+                fig_ie = px.bar(
+                    ie_data, x="类别", y="金额",
+                    title="收入 vs 费用",
+                    color="类别",
+                    color_discrete_map={"收入合计": "#66bb6a", "费用合计": "#ef5350"},
+                    text="金额",
+                )
+                fig_ie.update_traces(texttemplate="%{text:,.0f}", textposition="outside")
+                fig_ie.update_layout(height=400, showlegend=False)
+                st.plotly_chart(fig_ie, use_container_width=True)
+
+                # 净利润瀑布图
+                waterfall_data = [
+                    {"项目": "收入合计", "金额": income_total, "类型": "收入"},
+                    {"项目": "费用合计", "金额": -expense_total, "类型": "费用"},
+                    {"项目": "净利润", "金额": net_profit, "类型": "结果"},
+                ]
+                fig_wf = go.Figure(go.Waterfall(
+                    name="损益",
+                    orientation="v",
+                    measure=["relative", "relative", "total"],
+                    x=[d["项目"] for d in waterfall_data],
+                    y=[d["金额"] for d in waterfall_data],
+                    connector={"line": {"color": "#bbb"}},
+                    increasing={"marker": {"color": "#66bb6a"}},
+                    decreasing={"marker": {"color": "#ef5350"}},
+                    totals={"marker": {"color": "#42a5f5"}},
+                ))
+                fig_wf.update_layout(title="损益瀑布图", height=400, yaxis_title="金额（元）")
+                st.plotly_chart(fig_wf, use_container_width=True)
+
+                # 收入构成饼图
+                if income_items:
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        fig_inc = px.pie(
+                            income_items, values="金额", names="科目",
+                            title="收入构成",
+                            color_discrete_sequence=px.colors.qualitative.Pastel,
+                        )
+                        fig_inc.update_traces(textposition="inside", textinfo="label+percent")
+                        fig_inc.update_layout(height=400)
+                        st.plotly_chart(fig_inc, use_container_width=True)
+                    with c2:
+                        # 毛利率计算
+                        main_revenue = _get_balance("6001") + _get_balance("6051")
+                        main_cost = _get_balance("6401") + _get_balance("6402")
+                        gross_profit = main_revenue - main_cost
+                        gross_margin = (gross_profit / main_revenue * 100) if main_revenue > 0 else 0
+                        st.metric("营业收入", fmt_money(main_revenue))
+                        st.metric("营业成本", fmt_money(main_cost))
+                        st.metric("毛利润", fmt_money(gross_profit))
+                        st.metric("毛利率", f"{gross_margin:.1f}%")
+            else:
+                st.info("暂无损益数据。")
+
+        # ===== 3. 收支趋势 =====
+        with viz_sub3:
+            if not monthly_data.empty:
+                # 月度借贷趋势折线图
+                fig_trend = go.Figure()
+                fig_trend.add_trace(go.Scatter(
+                    x=monthly_data["月份"], y=monthly_data["贷方合计"],
+                    mode="lines+markers", name="贷方（收入方）",
+                    line=dict(color="#66bb6a", width=2),
+                ))
+                fig_trend.add_trace(go.Scatter(
+                    x=monthly_data["月份"], y=monthly_data["借方合计"],
+                    mode="lines+markers", name="借方（支出方）",
+                    line=dict(color="#ef5350", width=2),
+                ))
+                fig_trend.update_layout(
+                    title="月度借贷发生额趋势",
+                    xaxis_title="月份", yaxis_title="金额（元）",
+                    height=400, hovermode="x unified",
+                )
+                st.plotly_chart(fig_trend, use_container_width=True)
+
+                # 月度凭证数量
+                monthly_count = all_vouchers_df.groupby("月份").size().reset_index(name="凭证数")
+                if not monthly_count.empty:
+                    fig_count = px.bar(
+                        monthly_count, x="月份", y="凭证数",
+                        title="月度凭证数量",
+                        color_discrete_sequence=["#42a5f5"],
+                    )
+                    fig_count.update_layout(height=350)
+                    st.plotly_chart(fig_count, use_container_width=True)
+
+                # 月度净发生额（贷方 - 借方）
+                monthly_data["净发生额"] = monthly_data["贷方合计"] - monthly_data["借方合计"]
+                colors = ["#66bb6a" if v >= 0 else "#ef5350" for v in monthly_data["净发生额"]]
+                fig_net = px.bar(
+                    monthly_data, x="月份", y="净发生额",
+                    title="月度净发生额（贷方 - 借方）",
+                )
+                fig_net.update_traces(marker_color=colors)
+                fig_net.update_layout(height=350)
+                st.plotly_chart(fig_net, use_container_width=True)
+            else:
+                st.info("暂无凭证数据，请先录入凭证。")
+
+        # ===== 4. 费用构成 =====
+        with viz_sub4:
+            if expense_items:
+                # 费用构成饼图
+                fig_exp = px.pie(
+                    expense_items, values="金额", names="科目",
+                    title="费用构成",
+                    color_discrete_sequence=px.colors.qualitative.Set3,
+                )
+                fig_exp.update_traces(textposition="inside", textinfo="label+percent")
+                fig_exp.update_layout(height=400)
+                st.plotly_chart(fig_exp, use_container_width=True)
+
+                # 费用排序柱状图
+                sorted_exp = sorted(expense_items, key=lambda x: x["金额"], reverse=True)
+                fig_exp_bar = px.bar(
+                    sorted_exp, x="科目", y="金额",
+                    title="费用科目排序",
+                    color="金额", color_continuous_scale="Reds",
+                )
+                fig_exp_bar.update_layout(height=400, xaxis_tickangle=-30)
+                st.plotly_chart(fig_exp_bar, use_container_width=True)
+
+                # 费用占比表
+                total_exp = sum(d["金额"] for d in expense_items)
+                st.markdown("#### 费用占比明细")
+                for item in sorted_exp:
+                    pct = item["金额"] / total_exp * 100 if total_exp > 0 else 0
+                    st.markdown(
+                        f"- **{item['科目']}**：{fmt_money(item['金额'])} 元（{pct:.1f}%）"
+                    )
+            else:
+                st.info("暂无费用数据。")
+
+            # 税务相关费用专项分析
+            tax_codes = ["6601", "6602"]  # 销售/管理费用下的税务二级科目
+            tax_items = []
+            df_custom = get_custom_accounts()
+            if not df_custom.empty and "tax_flag" in df_custom.columns:
+                tax_df = df_custom[df_custom["tax_flag"].notna() & (df_custom["tax_flag"] != "")]
+                if not tax_df.empty:
+                    for _, row in tax_df.iterrows():
+                        _, _, _, _, bal = calc_account_balance(row["full_code"])
+                        if abs(bal) > 0.01:
+                            tax_items.append({
+                                "科目": row["full_name"],
+                                "税务标记": row["tax_flag"],
+                                "金额": abs(bal),
+                            })
+
+            if tax_items:
+                st.markdown("---")
+                st.markdown("#### 🔖 税务相关费用分析")
+                fig_tax = px.bar(
+                    tax_items, x="科目", y="金额",
+                    title="税务标记科目金额",
+                    color="税务标记",
+                    color_discrete_sequence=px.colors.qualitative.Dark2,
+                )
+                fig_tax.update_layout(height=400, xaxis_tickangle=-30)
+                st.plotly_chart(fig_tax, use_container_width=True)
 
 
 st.divider()
