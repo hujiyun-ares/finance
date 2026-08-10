@@ -62,6 +62,7 @@ _USE_POSTGRES = bool(_SUPABASE_URL)
 # 表主键映射（用于 INSERT OR REPLACE → ON CONFLICT 转换）
 _TABLE_PK = {
     'opening_balances': 'account_code',
+    'custom_accounts': 'full_code',
     'products': 'product_code',
     'products_standard': 'spu_code',
     'product_skus': 'sku_code',
@@ -90,8 +91,26 @@ def _adapt_sql(sql):
     sql = sql.replace("INTEGER PRIMARY KEY AUTOINCREMENT", "SERIAL PRIMARY KEY")
     # datetime('now') → CURRENT_TIMESTAMP
     sql = sql.replace("datetime('now')", "CURRENT_TIMESTAMP")
+    # INSERT OR IGNORE → INSERT ... ON CONFLICT DO NOTHING
+    sql = _convert_insert_or_ignore(sql)
     # INSERT OR REPLACE → INSERT ... ON CONFLICT ... DO UPDATE
     sql = _convert_insert_or_replace(sql)
+    return sql
+
+
+def _convert_insert_or_ignore(sql):
+    """将 SQLite 的 INSERT OR IGNORE 转换为 PostgreSQL 的 ON CONFLICT DO NOTHING"""
+    pattern = r'INSERT\s+OR\s+IGNORE\s+INTO\s+(\w+)'
+    match = re.search(pattern, sql, re.IGNORECASE)
+    if not match:
+        return sql
+    table = match.group(1)
+    pk = _TABLE_PK.get(table)
+    # 先把 INSERT OR IGNORE 替换为普通 INSERT
+    sql = re.sub(r'INSERT\s+OR\s+IGNORE\s+INTO', 'INSERT INTO', sql, flags=re.IGNORECASE)
+    if pk:
+        sql = sql.rstrip().rstrip(';')
+        sql += f"\n        ON CONFLICT ({pk}) DO NOTHING"
     return sql
 
 
@@ -1179,27 +1198,37 @@ def init_database():
     # ============================================================
     # 预置常用二级科目（税务相关）
     # 如果 custom_accounts 表为空，自动创建以下二级科目：
-    #   6601 销售费用 → 业务招待费、广告费
+    #   6601 销售费用 → 业务招待费、广告费、职工福利费
+    #   6602 管理费用 → 业务招待费、研发费用、职工福利费、工会经费、职工教育经费
     #   6711 营业外支出 → 公益性捐赠
-    #   6602 管理费用 → 业务招待费、研发费用
     #   2211 应付职工薪酬 → 职工福利费、工会经费、职工教育经费
     # ============================================================
     c.execute("SELECT COUNT(*) FROM custom_accounts")
     if c.fetchone()[0] == 0:
         _preset_subs = [
             # (parent_code, parent_name, sub_name, category, direction, tax_flag)
+            # —— 6601 销售费用（损益-费用，借方）——
             ("6601", "销售费用", "业务招待费",   "损益-费用", "借", "业务招待费"),
             ("6601", "销售费用", "广告费",       "损益-费用", "借", "广告费"),
-            ("6601", "销售费用", "职工薪酬",     "损益-费用", "借", "职工福利费"),
+            ("6601", "销售费用", "职工福利费",   "损益-费用", "借", "职工福利费"),
+            # —— 6602 管理费用（损益-费用，借方）——
             ("6602", "管理费用", "业务招待费",   "损益-费用", "借", "业务招待费"),
             ("6602", "管理费用", "研发费用",     "损益-费用", "借", "研发费用"),
-            ("6602", "管理费用", "职工薪酬",     "损益-费用", "借", "职工福利费"),
+            ("6602", "管理费用", "职工福利费",   "损益-费用", "借", "职工福利费"),
             ("6602", "管理费用", "工会经费",     "损益-费用", "借", "工会经费"),
             ("6602", "管理费用", "职工教育经费", "损益-费用", "借", "职工教育经费"),
+            # —— 6711 营业外支出（损益-费用，借方）——
             ("6711", "营业外支出", "公益性捐赠", "损益-费用", "借", "公益性捐赠"),
+            # —— 2211 应付职工薪酬（负债，贷方）——
+            ("2211", "应付职工薪酬", "职工福利费",   "负债", "贷", "职工福利费"),
+            ("2211", "应付职工薪酬", "工会经费",     "负债", "贷", "工会经费"),
+            ("2211", "应付职工薪酬", "职工教育经费", "负债", "贷", "职工教育经费"),
         ]
-        for idx, (p_code, p_name, s_name, cat, direction, tax_flag) in enumerate(_preset_subs):
-            sub_code = f"{idx + 1:02d}"
+        # 按父科目分别编号（01、02、03...），避免跨科目编号混乱
+        _sub_counters = {}
+        for p_code, p_name, s_name, cat, direction, tax_flag in _preset_subs:
+            _sub_counters[p_code] = _sub_counters.get(p_code, 0) + 1
+            sub_code = f"{_sub_counters[p_code]:02d}"
             full_code = f"{p_code}{sub_code}"
             full_name = f"{p_name}-{s_name}"
             c.execute("""
