@@ -1,0 +1,25 @@
+# 数据库文件（包含用户敏感数据，不可上传）
+*.db
+*.sqlite
+*.sqlite3
+
+# 上传的图片和文件
+.uploads/
+.screenshots/
+
+# Streamlit 密钥文件（包含数据库密码，不可上传）
+.streamlit/secrets.toml
+
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+
+# 环境文件
+.env
+venv/
+.venv/
+
+# 系统文件
+.DS_Store
+Thumbs.db
