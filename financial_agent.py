@@ -1209,28 +1209,34 @@ def save_voucher(voucher_number, voucher_date, summary, lines):
         ))
     conn.commit()
     conn.close()
+    get_all_vouchers.clear()
 
 
+@st.cache_data(ttl=60, show_spinner=False)
 def get_all_vouchers():
-    """获取所有凭证，返回 DataFrame"""
+    """获取所有凭证，返回 DataFrame，缓存 1 分钟"""
     conn = sqlite3.connect(DB_PATH)
     df = pd.read_sql_query("SELECT * FROM vouchers ORDER BY id", conn)
     conn.close()
     return df
 
 
-def get_opening_balance(account_code):
-    """获取某个科目的期初余额（借方和贷方）"""
+@st.cache_data(ttl=30, show_spinner=False)
+def get_all_opening_balances():
+    """一次查询获取所有期初余额，返回 {account_code: (debit, credit)} 字典"""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute(
-        "SELECT opening_debit, opening_credit FROM opening_balances WHERE account_code = ?",
-        (account_code,),
-    )
-    row = c.fetchone()
+    c.execute("SELECT account_code, opening_debit, opening_credit FROM opening_balances")
+    rows = c.fetchall()
     conn.close()
-    if row:
-        return row[0] or 0, row[1] or 0
+    return {row[0]: (row[1] or 0, row[2] or 0) for row in rows}
+
+
+def get_opening_balance(account_code):
+    """获取某个科目的期初余额（借方和贷方）"""
+    _all = get_all_opening_balances()
+    if account_code in _all:
+        return _all[account_code]
     return 0, 0
 
 
@@ -1245,6 +1251,7 @@ def save_opening_balance(account_code, debit, credit):
     """, (account_code, float(debit), float(credit)))
     conn.commit()
     conn.close()
+    get_all_opening_balances.clear()
 
 
 # ============================================================
@@ -1326,9 +1333,11 @@ def delete_custom_account(full_code):
     conn.close()
 
 
+@st.cache_data(ttl=300, show_spinner=False)
 def get_all_accounts_for_display():
     """
     合并系统科目 + 自定义二级科目，返回统一格式的列表。
+    缓存 5 分钟，减少数据库查询次数。
     每个元素: {"code", "name", "display_name", "category", "direction",
                "is_custom", "parent_code", "tax_flag", "level"}
     level: 1=一级科目, 2=二级科目
@@ -1364,8 +1373,9 @@ def get_all_accounts_for_display():
     return result
 
 
+@st.cache_data(ttl=300, show_spinner=False)
 def get_account_names_dynamic():
-    """获取动态科目名称列表（用于下拉选择框）"""
+    """获取动态科目名称列表（用于下拉选择框），缓存 5 分钟"""
     accounts = get_all_accounts_for_display()
     return [a["display_name"] for a in accounts]
 
@@ -1407,6 +1417,7 @@ def get_account_info_dynamic(code):
     return None
 
 
+@st.cache_data(ttl=300, show_spinner=False)
 def get_sub_account_codes(parent_code):
     """获取某个一级科目下所有二级科目的编码列表"""
     conn = sqlite3.connect(DB_PATH)
@@ -1423,6 +1434,7 @@ def _now():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
+@st.cache_data(ttl=60, show_spinner=False)
 def get_all_products():
     """获取所有产品档案，返回 DataFrame"""
     conn = sqlite3.connect(DB_PATH)
@@ -1476,6 +1488,7 @@ def get_product_stock(product_code):
     return stock or 0
 
 
+@st.cache_data(ttl=60, show_spinner=False)
 def get_all_stock():
     """获取所有产品的当前库存汇总，返回 DataFrame"""
     conn = sqlite3.connect(DB_PATH)
@@ -1606,6 +1619,7 @@ def get_inventory_movements(product_code=None):
 
 # ---------- 1. SPU（标准商品库）管理 ----------
 
+@st.cache_data(ttl=60, show_spinner=False)
 def get_all_spus():
     """获取所有标准商品（SPU），返回 DataFrame"""
     conn = sqlite3.connect(DB_PATH)
@@ -1732,6 +1746,7 @@ def delete_sku(sku_code):
 
 # ---------- 3. 平台店铺管理 ----------
 
+@st.cache_data(ttl=60, show_spinner=False)
 def get_all_shops():
     """获取所有平台店铺，返回 DataFrame"""
     conn = sqlite3.connect(DB_PATH)
@@ -2105,6 +2120,7 @@ def import_products_from_excel(file_bytes):
 
 # ---------- 1. 会员等级管理 ----------
 
+@st.cache_data(ttl=60, show_spinner=False)
 def get_all_levels():
     """查询所有会员等级，按 sort_order 排序，返回 DataFrame"""
     conn = sqlite3.connect(DB_PATH)
@@ -2208,6 +2224,7 @@ def init_preset_levels():
 
 # ---------- 2. 客户管理 ----------
 
+@st.cache_data(ttl=60, show_spinner=False)
 def get_all_customers():
     """查询所有客户，返回 DataFrame"""
     conn = sqlite3.connect(DB_PATH)
@@ -2578,6 +2595,7 @@ OMS_PAYMENT_METHODS = ["在线支付", "货到付款", "银行转账", "微信�
 
 # ---------- 1. 订单基础管理 ----------
 
+@st.cache_data(ttl=30, show_spinner=False)
 def get_all_orders(status_filter=None, platform_filter=None):
     """查询订单列表，支持按状态/平台筛选，返回 DataFrame"""
     conn = sqlite3.connect(DB_PATH)
@@ -3152,6 +3170,7 @@ def batch_ship(orders_data, operator):
 
 # ---------- 6. 统计看板 ----------
 
+@st.cache_data(ttl=30, show_spinner=False)
 def get_order_stats():
     """订单统计看板数据，返回 dict"""
     conn = sqlite3.connect(DB_PATH)
@@ -3645,6 +3664,7 @@ def bi_hourly_distribution(date_from=None, date_to=None):
 # 第 3 部分：核心会计计算函数
 # ============================================================
 
+@st.cache_data(ttl=30, show_spinner=False)
 def calc_account_balance(account_code):
     """
     计算某个科目的期末余额
@@ -3788,12 +3808,15 @@ def get_account_ledger(account_code):
 # 第 4 部分：主界面 —— 八个 Tab
 # ============================================================
 
-try:
-    init_database()
-except Exception as _init_err:
-    st.error(f"⚠️ 数据库初始化失败: {_init_err}")
-    st.info(f"数据库模式: {'PostgreSQL' if _USE_POSTGRES else 'SQLite'} | DB_PATH: {DB_PATH}")
-    st.stop()
+# 只在首次加载时初始化数据库（避免每次 rerun 都创建 31 张表）
+if not st.session_state.get("_db_initialized"):
+    try:
+        init_database()
+        st.session_state["_db_initialized"] = True
+    except Exception as _init_err:
+        st.error(f"⚠️ 数据库初始化失败: {_init_err}")
+        st.info(f"数据库模式: {'PostgreSQL' if _USE_POSTGRES else 'SQLite'} | DB_PATH: {DB_PATH}")
+        st.stop()
 
 # --- 用户信息栏 ---
 _header_col1, _header_col2, _header_col3 = st.columns([6, 2, 1])
@@ -3970,22 +3993,6 @@ with tab1:
     # --- 录入凭证 ---
     with sub2:
         st.subheader("录入记账凭证")
-
-        # === 调试信息：显示数据库连接状态 ===
-        try:
-            _test_conn = sqlite3.connect(DB_PATH)
-            _test_cur = _test_conn.cursor()
-            _test_cur.execute("SELECT count(*) FROM vouchers")
-            _test_cnt = _test_cur.fetchone()[0]
-            _test_cur.execute("SELECT count(*) FROM custom_accounts")
-            _custom_cnt = _test_cur.fetchone()[0]
-            _test_conn.close()
-            _db_mode = "PostgreSQL (Supabase)" if _USE_POSTGRES else "SQLite (本地)"
-            st.caption(f"📊 数据库: {_db_mode} | 凭证: {_test_cnt} 条 | 自定义科目: {_custom_cnt} 条")
-        except Exception as _db_err:
-            st.error(f"⚠️ 数据库连接错误: {_db_err}")
-            st.info("如果是云端部署，请检查 Supabase 连接配置是否正确。")
-            st.stop()
 
         # 凭证金额专用回调：Enter 格式化 + 最后一行自动新增行
         def _voucher_money_cb(key):
@@ -6815,8 +6822,10 @@ with tab6:
     M6_POINT_TYPES = ["手动增加", "兑换扣减", "活动奖励", "等级奖励"]
     M6_BLOCK_TYPES = ["永久", "临时"]
 
-    # 确保预置等级存在
-    init_preset_levels()
+    # 确保预置等级存在（仅首次运行）
+    if not st.session_state.get("_preset_levels_done"):
+        init_preset_levels()
+        st.session_state["_preset_levels_done"] = True
 
     m6_sub1, m6_sub2, m6_sub3, m6_sub4, m6_sub5, m6_sub6, m6_sub7, m6_sub8 = st.tabs([
         "会员档案", "平台账号聚合", "会员等级", "消费记录",
@@ -7581,8 +7590,10 @@ with tab7:
     st.header("📋 全渠道订单OMS")
     st.caption("全渠道订单管理：订单录入、智能审核、合并拆分、打单发货、异常拦截、物流同步与统计看板。")
 
-    # 初始化预置物流公司
-    init_preset_logistics()
+    # 初始化预置物流公司（仅首次运行）
+    if not st.session_state.get("_preset_logistics_done"):
+        init_preset_logistics()
+        st.session_state["_preset_logistics_done"] = True
 
     oms_sub1, oms_sub2, oms_sub3, oms_sub4, oms_sub5, oms_sub6, oms_sub7 = st.tabs([
         "订单看板", "订单列表与录入", "订单审核", "订单合并与拆分",
