@@ -5790,116 +5790,154 @@ with tab2:
         liab_accounts = [a for a in ACCOUNT_CHART if a["category"] == "负债"]
         equity_accounts = [a for a in ACCOUNT_CHART if a["category"] == "权益"]
 
+        # --- 标准会计格式：左方资产，右方负债+所有者权益，底部合计相等 ---
+
         def fmt_amt(v):
             """格式化金额：0 显示空"""
             if abs(v) < 0.005:
                 return ""
             return f"{v:,.2f}"
 
-        def build_rows(accounts):
-            """构建表格数据行，金额来自明细账期末余额"""
+        def _build_bs_rows(accounts):
+            """构建资产负债表数据行"""
             rows = []
             for idx, acc in enumerate(accounts, 1):
                 od, oc, pd, pc, ending = calc_account_balance(acc["code"])
-                # 年初余额 = 期初余额（借方科目取期初借方，贷方科目取期初贷方）
-                if acc["direction"] == "借":
-                    opening = od
-                else:
-                    opening = oc
+                opening = od if acc["direction"] == "借" else oc
                 rows.append({
-                    "序号": idx,
-                    "科目编码": acc["code"],
-                    "科目名称": acc["name"],
-                    "方向": acc["direction"],
-                    "期末余额": fmt_amt(ending),
-                    "年初余额": fmt_amt(opening),
+                    "code": acc["code"],
+                    "name": acc["name"],
+                    "ending": ending,
+                    "opening": opening,
                 })
             return rows
 
-        # --- 三栏并排：资产 | 负债 | 所有者权益 ---
-        col_a, col_l, col_e = st.columns(3)
+        asset_rows = _build_bs_rows(asset_accounts)
+        liab_rows = _build_bs_rows(liab_accounts)
+        equity_rows = _build_bs_rows(equity_accounts)
 
-        with col_a:
-            st.markdown("**资产部分**")
-            asset_rows = build_rows(asset_accounts)
-            # 合计
-            asset_ending_total = sum(calc_account_balance(a["code"])[4] for a in asset_accounts)
-            asset_opening_total = sum(
-                (calc_account_balance(a["code"])[0] if a["direction"] == "借"
-                 else calc_account_balance(a["code"])[1])
-                for a in asset_accounts
-            )
-            asset_df = pd.DataFrame(asset_rows, columns=["序号", "科目编码", "科目名称", "方向", "期末余额", "年初余额"])
-            st.dataframe(asset_df, use_container_width=True, hide_index=True)
-            st.markdown(
-                f'<div style="font-weight:600; text-align:right; padding:6px 0; '
-                f'border-top:2px solid #333; font-size:14px;">'
-                f'资产合计 &nbsp; 期末：{fmt_amt(asset_ending_total)} &nbsp;&nbsp; '
-                f'年初：{fmt_amt(asset_opening_total)}'
-                f'</div>',
-                unsafe_allow_html=True,
-            )
+        asset_ending_total = sum(r["ending"] for r in asset_rows)
+        asset_opening_total = sum(r["opening"] for r in asset_rows)
+        liab_ending_total = sum(r["ending"] for r in liab_rows)
+        liab_opening_total = sum(r["opening"] for r in liab_rows)
+        equity_ending_total = sum(r["ending"] for r in equity_rows)
+        equity_opening_total = sum(r["opening"] for r in equity_rows)
 
-        with col_l:
-            st.markdown("**负债部分**")
-            liab_rows = build_rows(liab_accounts)
-            liab_ending_total = sum(calc_account_balance(a["code"])[4] for a in liab_accounts)
-            liab_opening_total = sum(
-                (calc_account_balance(a["code"])[1] if a["direction"] == "贷"
-                 else calc_account_balance(a["code"])[0])
-                for a in liab_accounts
-            )
-            liab_df = pd.DataFrame(liab_rows, columns=["序号", "科目编码", "科目名称", "方向", "期末余额", "年初余额"])
-            st.dataframe(liab_df, use_container_width=True, hide_index=True)
-            st.markdown(
-                f'<div style="font-weight:600; text-align:right; padding:6px 0; '
-                f'border-top:2px solid #333; font-size:14px;">'
-                f'负债合计 &nbsp; 期末：{fmt_amt(liab_ending_total)} &nbsp;&nbsp; '
-                f'年初：{fmt_amt(liab_opening_total)}'
-                f'</div>',
-                unsafe_allow_html=True,
-            )
+        # 右方 = 负债 + 所有者权益
+        right_ending_total = liab_ending_total + equity_ending_total
+        right_opening_total = liab_opening_total + equity_opening_total
 
-        with col_e:
-            st.markdown("**所有者权益部分**")
-            equity_rows = build_rows(equity_accounts)
-            equity_ending_total = sum(calc_account_balance(a["code"])[4] for a in equity_accounts)
-            equity_opening_total = sum(
-                (calc_account_balance(a["code"])[1] if a["direction"] == "贷"
-                 else calc_account_balance(a["code"])[0])
-                for a in equity_accounts
-            )
-            equity_df = pd.DataFrame(equity_rows, columns=["序号", "科目编码", "科目名称", "方向", "期末余额", "年初余额"])
-            st.dataframe(equity_df, use_container_width=True, hide_index=True)
-            st.markdown(
-                f'<div style="font-weight:600; text-align:right; padding:6px 0; '
-                f'border-top:2px solid #333; font-size:14px;">'
-                f'权益合计 &nbsp; 期末：{fmt_amt(equity_ending_total)} &nbsp;&nbsp; '
-                f'年初：{fmt_amt(equity_opening_total)}'
-                f'</div>',
-                unsafe_allow_html=True,
-            )
+        # 构建左方行列表（资产 + 合计行）
+        left_rows = []
+        for r in asset_rows:
+            left_rows.append({"code": r["code"], "name": r["name"],
+                              "ending": r["ending"], "opening": r["opening"],
+                              "is_total": False})
+        left_rows.append({"code": "", "name": "资产总计",
+                          "ending": asset_ending_total, "opening": asset_opening_total,
+                          "is_total": True})
+
+        # 构建右方行列表（负债 + 负债合计 + 权益 + 权益合计 + 总合计）
+        right_rows = []
+        for r in liab_rows:
+            right_rows.append({"code": r["code"], "name": r["name"],
+                               "ending": r["ending"], "opening": r["opening"],
+                               "is_total": False, "is_section": False})
+        right_rows.append({"code": "", "name": "负债合计",
+                           "ending": liab_ending_total, "opening": liab_opening_total,
+                           "is_total": False, "is_section": True})
+        for r in equity_rows:
+            right_rows.append({"code": r["code"], "name": r["name"],
+                               "ending": r["ending"], "opening": r["opening"],
+                               "is_total": False, "is_section": False})
+        right_rows.append({"code": "", "name": "所有者权益合计",
+                           "ending": equity_ending_total, "opening": equity_opening_total,
+                           "is_total": False, "is_section": True})
+        right_rows.append({"code": "", "name": "负债和所有者权益总计",
+                           "ending": right_ending_total, "opening": right_opening_total,
+                           "is_total": True, "is_section": False})
+
+        # 补齐行数（左右对齐）
+        max_rows = max(len(left_rows), len(right_rows))
+        while len(left_rows) < max_rows:
+            left_rows.append({"code": "", "name": "", "ending": 0, "opening": 0, "is_total": False})
+        while len(right_rows) < max_rows:
+            right_rows.append({"code": "", "name": "", "ending": 0, "opening": 0,
+                               "is_total": False, "is_section": False})
+
+        # --- 渲染 HTML 表格（标准左右对照格式） ---
+        html_rows = ""
+        for i in range(max_rows):
+            lr = left_rows[i]
+            rr = right_rows[i]
+
+            # 左方行样式
+            l_style = 'font-weight:700; border-top:2px solid #333;' if lr.get("is_total") else ''
+            l_ending = fmt_amt(lr["ending"]) if lr["ending"] else ""
+            l_opening = fmt_amt(lr["opening"]) if lr["opening"] else ""
+
+            # 右方行样式
+            r_style = ""
+            if rr.get("is_total"):
+                r_style = 'font-weight:700; border-top:2px solid #333;'
+            elif rr.get("is_section"):
+                r_style = 'font-weight:600; border-top:1px solid #999;'
+            r_ending = fmt_amt(rr["ending"]) if rr["ending"] else ""
+            r_opening = fmt_amt(rr["opening"]) if rr["opening"] else ""
+
+            html_rows += f"""
+            <tr>
+                <td style="text-align:center; {l_style}">{lr['code']}</td>
+                <td style="text-align:left; {l_style}">{lr['name']}</td>
+                <td style="text-align:right; {l_style}">{l_ending}</td>
+                <td style="text-align:right; {l_style}">{l_opening}</td>
+                <td style="text-align:center; {r_style}">{rr['code']}</td>
+                <td style="text-align:left; {r_style}">{rr['name']}</td>
+                <td style="text-align:right; {r_style}">{r_ending}</td>
+                <td style="text-align:right; {r_style}">{r_opening}</td>
+            </tr>"""
+
+        st.markdown(f"""
+        <table style="width:100%; border-collapse:collapse; font-size:13px; margin-top:8px;">
+            <thead>
+                <tr style="background:#f0f4f8;">
+                    <th colspan="4" style="text-align:center; padding:8px; border:1px solid #ccc; font-size:15px;">资 产</th>
+                    <th colspan="4" style="text-align:center; padding:8px; border:1px solid #ccc; font-size:15px;">负债和所有者权益</th>
+                </tr>
+                <tr style="background:#e8eef5;">
+                    <th style="padding:4px 6px; border:1px solid #ccc; width:6%;">编码</th>
+                    <th style="padding:4px 6px; border:1px solid #ccc; text-align:left; width:20%;">科目名称</th>
+                    <th style="padding:4px 6px; border:1px solid #ccc; text-align:right; width:12%;">期末余额</th>
+                    <th style="padding:4px 6px; border:1px solid #ccc; text-align:right; width:12%;">年初余额</th>
+                    <th style="padding:4px 6px; border:1px solid #ccc; width:6%;">编码</th>
+                    <th style="padding:4px 6px; border:1px solid #ccc; text-align:left; width:20%;">科目名称</th>
+                    <th style="padding:4px 6px; border:1px solid #ccc; text-align:right; width:12%;">期末余额</th>
+                    <th style="padding:4px 6px; border:1px solid #ccc; text-align:right; width:12%;">年初余额</th>
+                </tr>
+            </thead>
+            <tbody>
+                {html_rows}
+            </tbody>
+        </table>
+        """, unsafe_allow_html=True)
 
         # --- 校验：资产 = 负债 + 所有者权益 ---
-        st.markdown("---")
-        liab_equity_ending = liab_ending_total + equity_ending_total
-        liab_equity_opening = liab_opening_total + equity_opening_total
-        diff_ending = asset_ending_total - liab_equity_ending
-        diff_opening = asset_opening_total - liab_equity_opening
+        diff_ending = asset_ending_total - right_ending_total
+        diff_opening = asset_opening_total - right_opening_total
 
         col_chk1, col_chk2 = st.columns(2)
         with col_chk1:
             if abs(diff_ending) < 0.01:
-                st.success(f"✅ 期末平衡：资产 {fmt_amt(asset_ending_total)} = 负债 {fmt_amt(liab_ending_total)} + 权益 {fmt_amt(equity_ending_total)}")
+                st.success(f"✅ 期末平衡：资产 {fmt_amt(asset_ending_total)} = 负债+权益 {fmt_amt(right_ending_total)}")
             else:
                 st.error(f"❌ 期末不平衡！差额：{fmt_amt(diff_ending)}")
         with col_chk2:
             if abs(diff_opening) < 0.01:
-                st.success(f"✅ 年初平衡：资产 {fmt_amt(asset_opening_total)} = 负债 {fmt_amt(liab_opening_total)} + 权益 {fmt_amt(equity_opening_total)}")
+                st.success(f"✅ 年初平衡：资产 {fmt_amt(asset_opening_total)} = 负债+权益 {fmt_amt(right_opening_total)}")
             else:
                 st.error(f"❌ 年初不平衡！差额：{fmt_amt(diff_opening)}")
 
-        # --- 导出 Excel ---
+        # --- 导出 Excel（左右对照格式） ---
         def export_bs_excel():
             from openpyxl import Workbook
             from openpyxl.styles import Font, Alignment, Border, Side
@@ -5910,94 +5948,118 @@ with tab2:
             ws.title = "资产负债表"
 
             _thin = Side(style='thin')
+            _medium = Side(style='medium')
             _border = Border(left=_thin, right=_thin, top=_thin, bottom=_thin)
+            _border_top = Border(left=_thin, right=_thin, top=_medium, bottom=_thin)
             _center = Alignment(horizontal='center', vertical='center')
             _right = Alignment(horizontal='right', vertical='center')
             _left = Alignment(horizontal='left', vertical='center')
             _bold = Font(bold=True)
             _title_font = Font(bold=True, size=16)
-            _info_font = Font(size=11)
+            _info_font = Font(size=10)
+            _header_font = Font(bold=True, size=10)
+
+            # 列宽
+            widths = {'A': 8, 'B': 22, 'C': 16, 'D': 16, 'E': 8, 'F': 22, 'G': 16, 'H': 16}
+            for col, w in widths.items():
+                ws.column_dimensions[col].width = w
 
             # 第1行：标题
-            ws.merge_cells('A1:F1')
+            ws.merge_cells('A1:H1')
             ws['A1'] = '资产负债表'
             ws['A1'].font = _title_font
             ws['A1'].alignment = _center
             ws.row_dimensions[1].height = 30
 
-            # 第2行：公司名称 / 报表日期 / 货币单位
+            # 第2行：公司信息
             ws['A2'] = f'编制单位：{company_name or ""}'
             ws['A2'].font = _info_font
-            ws.merge_cells('B2:C2')
-            ws['B2'] = f'报表日期：{report_date_str}'
-            ws['B2'].font = _info_font
-            ws['B2'].alignment = _center
-            ws['D2'] = f'货币单位：{currency_unit}'
-            ws['D2'].font = _info_font
-            ws.merge_cells('D2:F2')
-            ws['D2'].alignment = _right
-            ws.row_dimensions[2].height = 20
+            ws.merge_cells('C2:E2')
+            ws['C2'] = f'报表日期：{report_date_str}'
+            ws['C2'].font = _info_font
+            ws['C2'].alignment = _center
+            ws.merge_cells('F2:H2')
+            ws['F2'] = f'货币单位：{currency_unit}'
+            ws['F2'].font = _info_font
+            ws['F2'].alignment = _right
+            ws.row_dimensions[2].height = 18
 
-            # 第3行：表头
-            headers = ["序号", "科目编码", "科目名称", "方向", "期末余额", "年初余额"]
-            for col, h in enumerate(headers, 1):
-                cell = ws.cell(row=3, column=col, value=h)
-                cell.font = _bold
-                cell.alignment = _center
-                cell.border = _border
+            # 第3行：大类标题（资产 | 负债和所有者权益）
+            ws.merge_cells('A3:D3')
+            ws['A3'] = '资  产'
+            ws['A3'].font = _bold
+            ws['A3'].alignment = _center
+            ws['A3'].border = _border
+            ws.merge_cells('E3:H3')
+            ws['E3'] = '负债和所有者权益'
+            ws['E3'].font = _bold
+            ws['E3'].alignment = _center
+            ws['E3'].border = _border
             ws.row_dimensions[3].height = 22
 
-            # 写入数据：资产 | 负债 | 所有者权益（纵向排列）
-            row_idx = 4
-
-            def write_section(title, accounts, ending_total, opening_total):
-                nonlocal row_idx
-                # 部分标题行
-                ws.merge_cells(start_row=row_idx, start_column=1, end_row=row_idx, end_column=6)
-                cell = ws.cell(row=row_idx, column=1, value=title)
-                cell.font = _bold
-                cell.alignment = _left
+            # 第4行：列标题
+            headers = ["编码", "科目名称", "期末余额", "年初余额",
+                       "编码", "科目名称", "期末余额", "年初余额"]
+            for col, h in enumerate(headers, 1):
+                cell = ws.cell(row=4, column=col, value=h)
+                cell.font = _header_font
+                cell.alignment = _center
                 cell.border = _border
-                row_idx += 1
+            ws.row_dimensions[4].height = 20
 
-                # 科目行
-                for idx, acc in enumerate(accounts, 1):
-                    od, oc, pd, pc, ending = calc_account_balance(acc["code"])
-                    opening = od if acc["direction"] == "借" else oc
-                    row_data = [idx, acc["code"], acc["name"], acc["direction"],
-                                fmt_amt(ending), fmt_amt(opening)]
-                    for col, val in enumerate(row_data, 1):
-                        cell = ws.cell(row=row_idx, column=col, value=val)
-                        cell.border = _border
-                        if col in (1, 4):
-                            cell.alignment = _center
-                        elif col in (5, 6):
-                            cell.alignment = _right
-                        else:
-                            cell.alignment = _left
-                    row_idx += 1
+            # 数据行
+            row_idx = 5
+            for i in range(max_rows):
+                lr = left_rows[i]
+                rr = right_rows[i]
 
-                # 合计行
-                row_data = ["", "", f"{title}合计", "", fmt_amt(ending_total), fmt_amt(opening_total)]
-                for col, val in enumerate(row_data, 1):
-                    cell = ws.cell(row=row_idx, column=col, value=val)
-                    cell.font = _bold
-                    cell.border = _border
-                    if col in (5, 6):
-                        cell.alignment = _right
-                    else:
+                # 左方
+                l_vals = [lr["code"], lr["name"],
+                          fmt_amt(lr["ending"]) if lr["ending"] else "",
+                          fmt_amt(lr["opening"]) if lr["opening"] else ""]
+                l_is_total = lr.get("is_total", False)
+                for col, val in enumerate(l_vals, 1):
+                    cell = ws.cell(row=row_idx, column=col, value=val if val else None)
+                    cell.border = _border_top if l_is_total else _border
+                    cell.font = _bold if l_is_total else Font(size=10)
+                    if col == 1:
                         cell.alignment = _center
-                row_idx += 1
-                # 空行
+                    elif col == 2:
+                        cell.alignment = _left
+                    else:
+                        cell.alignment = _right
+
+                # 右方
+                r_vals = [rr["code"], rr["name"],
+                          fmt_amt(rr["ending"]) if rr["ending"] else "",
+                          fmt_amt(rr["opening"]) if rr["opening"] else ""]
+                r_is_total = rr.get("is_total", False)
+                r_is_section = rr.get("is_section", False)
+                for col, val in enumerate(r_vals, 5):
+                    cell = ws.cell(row=row_idx, column=col, value=val if val else None)
+                    cell.border = _border_top if (r_is_total or r_is_section) else _border
+                    if r_is_total or r_is_section:
+                        cell.font = _bold if r_is_total else Font(size=10, bold=True)
+                    else:
+                        cell.font = Font(size=10)
+                    if col == 5:
+                        cell.alignment = _center
+                    elif col == 6:
+                        cell.alignment = _left
+                    else:
+                        cell.alignment = _right
+
+                ws.row_dimensions[row_idx].height = 18
                 row_idx += 1
 
-            write_section("资产部分", asset_accounts, asset_ending_total, asset_opening_total)
-            write_section("负债部分", liab_accounts, liab_ending_total, liab_opening_total)
-            write_section("所有者权益部分", equity_accounts, equity_ending_total, equity_opening_total)
-
-            # 列宽
-            for col, width in enumerate([6, 10, 24, 6, 18, 18], 1):
-                ws.column_dimensions[chr(64 + col)].width = width
+            # 平衡校验行
+            row_idx += 1
+            ws.merge_cells(start_row=row_idx, start_column=1, end_row=row_idx, end_column=4)
+            if abs(diff_ending) < 0.01:
+                ws.cell(row=row_idx, column=1, value=f"✅ 期末平衡：资产 = 负债+权益 = {fmt_amt(asset_ending_total)}")
+            else:
+                ws.cell(row=row_idx, column=1, value=f"❌ 期末不平衡！差额：{fmt_amt(diff_ending)}")
+            ws.cell(row=row_idx, column=1).font = Font(bold=True, size=10, color="2e7d32" if abs(diff_ending) < 0.01 else "c62828")
 
             output = io.BytesIO()
             wb.save(output)
