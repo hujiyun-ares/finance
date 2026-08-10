@@ -3914,6 +3914,315 @@ def calc_account_balance(account_code):
     return opening_debit, opening_credit, period_debit, period_credit, ending_balance
 
 
+# ============================================================
+# 期末自动结转功能
+# ----------------------------------------------------------
+# 月末：将所有损益类科目余额结转至"本年利润"（4103）
+#   收入类（贷方余额）→ 借记收入科目，贷记 4103
+#   费用类（借方余额）→ 借记 4103，贷记费用科目
+# 年末：再将 4103 余额转入"利润分配-未分配利润"（410403）
+#   并可选提取法定盈余公积（净利润的 10%）
+# ============================================================
+
+# 需要结转的损益类科目（按类别分组）
+_INCOME_ACCOUNT_CODES = [
+    "6001", "6021", "6041", "6051",       # 主营/其他业务收入、租赁收入
+    "6101", "6102", "6103",               # 公允价值变动损益等
+    "6111", "6115", "6117",               # 投资收益、资产处置损益、其他收益
+    "6301",                                # 营业外收入
+]
+
+_EXPENSE_ACCOUNT_CODES = [
+    "6401", "6402", "6403",               # 主营/其他业务成本、税金及附加
+    "6405",                                # 研发费用
+    "6601", "6602", "6603",               # 销售/管理/财务费用
+    "6604", "6605", "6606",               # 勘探/租赁费用、汇兑损益
+    "6641", "6642",                        # 信用/资产减值损失
+    "6701",                                # 营业外支出
+    "6711",                                # 所得税费用
+]
+
+# 本年利润科目
+_PROFIT_ACCOUNT_CODE = "4103"
+# 利润分配-未分配利润科目编码（自定义二级科目）
+_UNDISTRIBUTED_PROFIT_CODE = "410403"
+# 盈余公积-法定盈余公积
+_LEGAL_RESERVE_CODE = "410101"
+# 利润分配-提取法定盈余公积
+_EXTRACT_LEGAL_RESERVE_CODE = "410401"
+
+
+def get_carryforward_preview():
+    """
+    计算期末结转预览数据。
+    返回 dict:
+      - income_items: [{code, name, balance, direction}]  收入类科目（贷方余额）
+      - expense_items: [{code, name, balance, direction}] 费用类科目（借方余额）
+      - total_income: 收入合计
+      - total_expense: 费用合计
+      - net_profit: 净利润（收入 - 费用）
+      - profit_balance: 本年利润科目当前余额
+    """
+    # 清除缓存以确保数据最新
+    calc_account_balance.clear()
+    get_all_opening_balances.clear()
+    get_all_vouchers.clear()
+
+    income_items = []
+    expense_items = []
+
+    # 收入类科目（正常余额在贷方）
+    for code in _INCOME_ACCOUNT_CODES:
+        acc = ACCOUNT_MAP.get(code)
+        if not acc:
+            continue
+        od, oc, pd, pc, ending = calc_account_balance(code)
+        # 收入类科目贷方余额 = 期初贷方 + 本期贷方 - 本期借方
+        balance = ending
+        if abs(balance) > 0.01:
+            income_items.append({
+                "code": code,
+                "name": acc["name"],
+                "balance": balance,
+                "direction": "贷" if balance > 0 else "借",
+            })
+
+    # 费用类科目（正常余额在借方）
+    for code in _EXPENSE_ACCOUNT_CODES:
+        acc = ACCOUNT_MAP.get(code)
+        if not acc:
+            continue
+        od, oc, pd, pc, ending = calc_account_balance(code)
+        balance = ending
+        if abs(balance) > 0.01:
+            expense_items.append({
+                "code": code,
+                "name": acc["name"],
+                "balance": balance,
+                "direction": "借" if balance > 0 else "贷",
+            })
+
+    total_income = sum(item["balance"] for item in income_items if item["balance"] > 0)
+    total_expense = sum(item["balance"] for item in expense_items if item["balance"] > 0)
+    # 负余额的收入类科目视为费用
+    total_income -= sum(abs(item["balance"]) for item in income_items if item["balance"] < 0)
+    # 负余额的费用类科目视为收入
+    total_expense -= sum(abs(item["balance"]) for item in expense_items if item["balance"] < 0)
+
+    # 本年利润当前余额
+    _, _, _, _, profit_balance = calc_account_balance(_PROFIT_ACCOUNT_CODE)
+
+    return {
+        "income_items": income_items,
+        "expense_items": expense_items,
+        "total_income": total_income,
+        "total_expense": total_expense,
+        "net_profit": total_income - total_expense,
+        "profit_balance": profit_balance,
+    }
+
+
+def execute_monthly_carryforward(carryforward_date):
+    """
+    执行月末损益结转：将所有损益类科目余额结转至"本年利润"。
+    生成两张凭证：
+      1. 结转收入：借各收入科目，贷 4103
+      2. 结转费用：借 4103，贷各费用科目
+    返回：生成的凭证编号列表
+    """
+    preview = get_carryforward_preview()
+    date_str = carryforward_date.strftime("%Y-%m-%d")
+    voucher_numbers = []
+
+    # —— 凭证 1：结转本期收入 ——
+    income_lines = []
+    for item in preview["income_items"]:
+        balance = item["balance"]
+        if balance > 0.01:
+            # 贷方余额 → 借记结转
+            income_lines.append({
+                "account_code": item["code"],
+                "account_name": item["name"],
+                "debit": balance,
+                "credit": 0,
+            })
+        elif balance < -0.01:
+            # 借方余额（净损失）→ 贷记结转
+            income_lines.append({
+                "account_code": item["code"],
+                "account_name": item["name"],
+                "debit": 0,
+                "credit": abs(balance),
+            })
+
+    total_income_credit = sum(l["debit"] for l in income_lines)
+    total_income_debit = sum(l["credit"] for l in income_lines)
+    income_net = total_income_credit - total_income_debit
+
+    if income_lines:
+        # 添加本年利润抵消行
+        if income_net > 0:
+            income_lines.append({
+                "account_code": _PROFIT_ACCOUNT_CODE,
+                "account_name": ACCOUNT_MAP[_PROFIT_ACCOUNT_CODE]["name"],
+                "debit": 0,
+                "credit": income_net,
+            })
+        elif income_net < 0:
+            income_lines.append({
+                "account_code": _PROFIT_ACCOUNT_CODE,
+                "account_name": ACCOUNT_MAP[_PROFIT_ACCOUNT_CODE]["name"],
+                "debit": abs(income_net),
+                "credit": 0,
+            })
+
+        v_num = get_next_voucher_number()
+        save_voucher(v_num, date_str, "月末结转：结转本期收入至本年利润", income_lines)
+        voucher_numbers.append(v_num)
+
+    # —— 凭证 2：结转本期费用 ——
+    expense_lines = []
+    for item in preview["expense_items"]:
+        balance = item["balance"]
+        if balance > 0.01:
+            # 借方余额 → 贷记结转
+            expense_lines.append({
+                "account_code": item["code"],
+                "account_name": item["name"],
+                "debit": 0,
+                "credit": balance,
+            })
+        elif balance < -0.01:
+            # 贷方余额 → 借记结转
+            expense_lines.append({
+                "account_code": item["code"],
+                "account_name": item["name"],
+                "debit": abs(balance),
+                "credit": 0,
+            })
+
+    total_expense_debit = sum(l["debit"] for l in expense_lines)
+    total_expense_credit = sum(l["credit"] for l in expense_lines)
+    expense_net = total_expense_credit - total_expense_debit
+
+    if expense_lines:
+        if expense_net > 0:
+            expense_lines.insert(0, {
+                "account_code": _PROFIT_ACCOUNT_CODE,
+                "account_name": ACCOUNT_MAP[_PROFIT_ACCOUNT_CODE]["name"],
+                "debit": expense_net,
+                "credit": 0,
+            })
+        elif expense_net < 0:
+            expense_lines.insert(0, {
+                "account_code": _PROFIT_ACCOUNT_CODE,
+                "account_name": ACCOUNT_MAP[_PROFIT_ACCOUNT_CODE]["name"],
+                "debit": 0,
+                "credit": abs(expense_net),
+            })
+
+        v_num = get_next_voucher_number()
+        save_voucher(v_num, date_str, "月末结转：结转本期费用至本年利润", expense_lines)
+        voucher_numbers.append(v_num)
+
+    # 清除缓存
+    calc_account_balance.clear()
+    get_all_vouchers.clear()
+    get_all_opening_balances.clear()
+
+    return voucher_numbers
+
+
+def execute_yearly_carryforward(carryforward_date, extract_legal_reserve=True, reserve_rate=0.10):
+    """
+    执行年末结转：
+      1. 先执行月末损益结转（确保所有损益科目清零）
+      2. 将"本年利润"余额转入"利润分配-未分配利润"
+      3. （可选）提取法定盈余公积
+    返回：{voucher_numbers, net_profit, reserve_amount}
+    """
+    date_str = carryforward_date.strftime("%Y-%m-%d")
+    all_voucher_numbers = []
+
+    # 步骤 1：先执行月末损益结转
+    monthly_vouchers = execute_monthly_carryforward(carryforward_date)
+    all_voucher_numbers.extend(monthly_vouchers)
+
+    # 步骤 2：本年利润 → 利润分配-未分配利润
+    _, _, _, _, profit_balance = calc_account_balance(_PROFIT_ACCOUNT_CODE)
+    voucher_numbers = []
+
+    if abs(profit_balance) > 0.01:
+        lines = []
+        if profit_balance > 0:
+            # 净利润：借本年利润，贷未分配利润
+            lines.append({
+                "account_code": _PROFIT_ACCOUNT_CODE,
+                "account_name": ACCOUNT_MAP[_PROFIT_ACCOUNT_CODE]["name"],
+                "debit": profit_balance,
+                "credit": 0,
+            })
+            lines.append({
+                "account_code": _UNDISTRIBUTED_PROFIT_CODE,
+                "account_name": "利润分配-未分配利润",
+                "debit": 0,
+                "credit": profit_balance,
+            })
+        else:
+            # 净亏损：借未分配利润，贷本年利润
+            abs_balance = abs(profit_balance)
+            lines.append({
+                "account_code": _UNDISTRIBUTED_PROFIT_CODE,
+                "account_name": "利润分配-未分配利润",
+                "debit": abs_balance,
+                "credit": 0,
+            })
+            lines.append({
+                "account_code": _PROFIT_ACCOUNT_CODE,
+                "account_name": ACCOUNT_MAP[_PROFIT_ACCOUNT_CODE]["name"],
+                "debit": 0,
+                "credit": abs_balance,
+            })
+
+        v_num = get_next_voucher_number()
+        save_voucher(v_num, date_str, "年末结转：本年利润转入利润分配-未分配利润", lines)
+        all_voucher_numbers.append(v_num)
+
+    # 步骤 3：提取法定盈余公积
+    reserve_amount = 0
+    if extract_legal_reserve and profit_balance > 0:
+        reserve_amount = round(profit_balance * reserve_rate, 2)
+        if reserve_amount > 0.01:
+            lines = [
+                {
+                    "account_code": _EXTRACT_LEGAL_RESERVE_CODE,
+                    "account_name": "利润分配-提取法定盈余公积",
+                    "debit": reserve_amount,
+                    "credit": 0,
+                },
+                {
+                    "account_code": _LEGAL_RESERVE_CODE,
+                    "account_name": "盈余公积-法定盈余公积",
+                    "debit": 0,
+                    "credit": reserve_amount,
+                },
+            ]
+            v_num = get_next_voucher_number()
+            save_voucher(v_num, date_str, "年末结转：提取法定盈余公积", lines)
+            all_voucher_numbers.append(v_num)
+
+    # 清除缓存
+    calc_account_balance.clear()
+    get_all_vouchers.clear()
+    get_all_opening_balances.clear()
+
+    return {
+        "voucher_numbers": all_voucher_numbers,
+        "net_profit": profit_balance,
+        "reserve_amount": reserve_amount,
+    }
+
+
 def get_account_ledger(account_code):
     """
     获取某个科目的明细账（所有凭证流水 + 运行余额）。
@@ -4029,7 +4338,7 @@ with tab1:
     st.header("📝 离线记账")
     st.caption("手动录入借贷分录，自动校验平衡，生成正式凭证。完全离线，无需 API。")
 
-    sub1, sub2, sub3, sub4, sub5 = st.tabs(["期初余额", "录入凭证", "凭证查询", "明细账", "科目管理"])
+    sub1, sub2, sub3, sub4, sub5, sub6 = st.tabs(["期初余额", "录入凭证", "凭证查询", "明细账", "科目管理", "🔄 期末结转"])
 
     # --- 期初余额 ---
     with sub1:
@@ -4954,6 +5263,209 @@ with tab1:
         for flag, desc in TAX_SPECIAL_FLAGS.items():
             if flag:
                 st.markdown(f"- **{flag}**：{desc}")
+
+    # --- 期末结转 ---
+    with sub6:
+        st.subheader("🔄 期末自动结转")
+        st.caption(
+            "月末将所有损益类科目（收入、费用）余额结转至「本年利润」，结转后损益类科目余额为零。\n\n"
+            "年末额外将「本年利润」余额转入「利润分配-未分配利润」，并可提取法定盈余公积。"
+        )
+
+        # 结转日期 & 类型选择
+        cf_cols = st.columns([2, 2, 2])
+        with cf_cols[0]:
+            cf_date = st.date_input(
+                "结转日期",
+                value=datetime.now(),
+                help="月末结转通常选当月最后一天，年末结转选12月31日",
+            )
+        with cf_cols[1]:
+            cf_type = st.radio(
+                "结转类型",
+                ["月末结转（损益→本年利润）", "年末结转（含利润分配）"],
+                label_visibility="collapsed",
+            )
+        with cf_cols[2]:
+            is_year_end = "年末" in cf_type
+            extract_reserve = False
+            reserve_rate = 0.10
+            if is_year_end:
+                extract_reserve = st.checkbox(
+                    "提取法定盈余公积（10%）",
+                    value=True,
+                    help="按净利润的 10% 提取，累计达注册资本 50% 后可不再提取",
+                )
+                if extract_reserve:
+                    reserve_rate = st.number_input(
+                        "计提比例", min_value=0.0, max_value=1.0,
+                        value=0.10, step=0.01, format="%.2f",
+                    )
+
+        st.markdown("---")
+
+        # 预览按钮
+        if st.button("🔍 生成结转预览", type="secondary", use_container_width=True):
+            st.session_state["_cf_preview_data"] = get_carryforward_preview()
+
+        # 显示预览数据
+        preview_data = st.session_state.get("_cf_preview_data")
+        if preview_data:
+            st.markdown("### 📋 结转预览")
+
+            # 收入类科目
+            if preview_data["income_items"]:
+                st.markdown("#### 一、收入类科目（结转至本年利润·贷方）")
+                inc_rows = []
+                for item in preview_data["income_items"]:
+                    inc_rows.append({
+                        "科目编码": item["code"],
+                        "科目名称": item["name"],
+                        "期末余额": fmt_money(abs(item["balance"])),
+                        "余额方向": item["direction"],
+                        "结转方向": "借方" if item["balance"] > 0 else "贷方",
+                        "结转金额": fmt_money(abs(item["balance"])),
+                    })
+                st.dataframe(pd.DataFrame(inc_rows), use_container_width=True, hide_index=True)
+            else:
+                st.info("收入类科目余额均为零，无需结转。")
+
+            # 费用类科目
+            if preview_data["expense_items"]:
+                st.markdown("#### 二、费用类科目（结转至本年利润·借方）")
+                exp_rows = []
+                for item in preview_data["expense_items"]:
+                    exp_rows.append({
+                        "科目编码": item["code"],
+                        "科目名称": item["name"],
+                        "期末余额": fmt_money(abs(item["balance"])),
+                        "余额方向": item["direction"],
+                        "结转方向": "贷方" if item["balance"] > 0 else "借方",
+                        "结转金额": fmt_money(abs(item["balance"])),
+                    })
+                st.dataframe(pd.DataFrame(exp_rows), use_container_width=True, hide_index=True)
+            else:
+                st.info("费用类科目余额均为零，无需结转。")
+
+            # 汇总
+            st.markdown("---")
+            sum_cols = st.columns(3)
+            with sum_cols[0]:
+                st.metric("收入合计", fmt_money(preview_data["total_income"]))
+            with sum_cols[1]:
+                st.metric("费用合计", fmt_money(preview_data["total_expense"]))
+            with sum_cols[2]:
+                net = preview_data["net_profit"]
+                st.metric(
+                    "本期净利润（估）",
+                    fmt_money(abs(net)),
+                    delta=f"{'盈利' if net > 0 else '亏损'}" if net != 0 else "持平",
+                )
+
+            # 本年利润当前余额
+            pb = preview_data["profit_balance"]
+            if abs(pb) > 0.01:
+                st.info(
+                    f"📌 「本年利润（4103）」当前余额：{fmt_money(abs(pb))} 元"
+                    f"（{'贷方' if pb > 0 else '借方'}）"
+                )
+
+            # 年末结转额外信息
+            if is_year_end and net > 0 and extract_reserve:
+                reserve_amt = round(net * reserve_rate, 2)
+                st.warning(
+                    f"📦 年末将额外执行：\n"
+                    f"- 将本年利润余额转入「利润分配-未分配利润」\n"
+                    f"- 提取法定盈余公积：{fmt_money(reserve_amt)} 元"
+                    f"（净利润 {fmt_money(net)} × {reserve_rate:.0%}）"
+                )
+
+            # 执行按钮
+            st.markdown("---")
+            btn_label = "年末结转（含利润分配）" if is_year_end else "执行月末结转"
+            if st.button(f"✅ 确认执行{btn_label}", type="primary", use_container_width=True):
+                with st.spinner("正在执行结转，请稍候..."):
+                    if is_year_end:
+                        result = execute_yearly_carryforward(
+                            cf_date,
+                            extract_legal_reserve=extract_reserve,
+                            reserve_rate=reserve_rate,
+                        )
+                        v_nums = result["voucher_numbers"]
+                        net_profit = result["net_profit"]
+                        reserve = result["reserve_amount"]
+                    else:
+                        v_nums = execute_monthly_carryforward(cf_date)
+                        net_profit = preview_data["net_profit"]
+                        reserve = 0
+
+                    st.session_state["_cf_result"] = {
+                        "vouchers": v_nums,
+                        "net_profit": net_profit,
+                        "reserve": reserve,
+                        "is_year_end": is_year_end,
+                    }
+                    # 清除预览
+                    st.session_state.pop("_cf_preview_data", None)
+                    st.rerun()
+
+        # 显示执行结果
+        cf_result = st.session_state.get("_cf_result")
+        if cf_result:
+            st.success("✅ 期末结转执行成功！")
+            st.markdown("### 📝 生成的结转凭证")
+
+            for vn in cf_result["vouchers"]:
+                v_df = get_all_vouchers()
+                v_rows = v_df[v_df["voucher_number"] == vn]
+                if not v_rows.empty:
+                    st.markdown(f"**凭证编号：{vn}** — {v_rows.iloc[0]['summary']}")
+                    display_df = v_rows[[
+                        "account_code", "account_name", "debit_amount", "credit_amount"
+                    ]].copy()
+                    display_df.columns = ["科目编码", "科目名称", "借方金额", "贷方金额"]
+                    display_df["借方金额"] = display_df["借方金额"].apply(fmt_money)
+                    display_df["贷方金额"] = display_df["贷方金额"].apply(fmt_money)
+                    st.dataframe(display_df, use_container_width=True, hide_index=True)
+
+            # 净利润汇总
+            net = cf_result["net_profit"]
+            st.markdown("---")
+            res_cols = st.columns(2)
+            with res_cols[0]:
+                st.metric("结转后净利润", fmt_money(abs(net)),
+                          delta=f"{'盈利' if net > 0 else '亏损'}")
+            with res_cols[1]:
+                if cf_result["is_year_end"] and cf_result["reserve"] > 0:
+                    st.metric("提取法定盈余公积", fmt_money(cf_result["reserve"]))
+                else:
+                    st.metric("损益类科目余额", "0.00 元", delta="已全部清零")
+
+            st.info("💡 结转后可在「凭证查询」中查看结转凭证，在「报表」中查看更新后的利润表和资产负债表。")
+
+            if st.button("清除结果"):
+                st.session_state.pop("_cf_result", None)
+                st.rerun()
+        elif not preview_data:
+            st.markdown("---")
+            st.info("👆 点击「生成结转预览」查看需要结转的科目及金额。")
+
+            with st.expander("📖 期末结转说明"):
+                st.markdown("""
+#### 月末结转流程
+1. **结转收入**：将主营业务收入、其他业务收入、投资收益等收入类科目余额结转至「本年利润」
+2. **结转费用**：将主营业务成本、销售费用、管理费用、财务费用等费用类科目余额结转至「本年利润」
+3. 结转后所有损益类科目余额为零，「本年利润」反映当期净利润/亏损
+
+#### 年末结转流程（在月末结转基础上）
+4. **结转本年利润**：将「本年利润」全年累计余额转入「利润分配-未分配利润」
+5. **提取法定盈余公积**：按净利润的 10% 提取（累计达注册资本 50% 后可不再提取）
+
+#### 注意事项
+- 结转会自动生成正式凭证，可在「凭证查询」中查看
+- 月末结转每月执行一次，年末结转仅在 12 月末执行
+- 执行前请确保当月所有日常凭证已录入完毕
+""")
 
 
 st.divider()
