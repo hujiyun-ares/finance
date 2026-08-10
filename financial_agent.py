@@ -1395,6 +1395,81 @@ def save_voucher(voucher_number, voucher_date, summary, lines):
     get_all_vouchers.clear()
 
 
+def delete_voucher(voucher_number):
+    """删除一张凭证（所有分录行）"""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("DELETE FROM vouchers WHERE voucher_number = ?", (voucher_number,))
+    conn.commit()
+    conn.close()
+    get_all_vouchers.clear()
+    get_all_opening_balances.clear()
+    calc_account_balance.clear()
+
+
+def update_voucher(voucher_number, new_date, new_summary, new_lines):
+    """
+    修改一张凭证：先删除旧分录，再写入新分录。
+    new_lines: [{account_code, account_name, debit, credit}, ...]
+    """
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    # 删除旧分录
+    c.execute("DELETE FROM vouchers WHERE voucher_number = ?", (voucher_number,))
+    # 写入新分录
+    for line in new_lines:
+        c.execute("""
+            INSERT INTO vouchers
+            (voucher_number, voucher_date, summary, account_code, account_name, debit_amount, credit_amount)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (
+            voucher_number,
+            new_date,
+            new_summary,
+            line["account_code"],
+            line["account_name"],
+            float(line["debit"]),
+            float(line["credit"]),
+        ))
+    conn.commit()
+    conn.close()
+    get_all_vouchers.clear()
+    get_all_opening_balances.clear()
+    calc_account_balance.clear()
+
+
+def get_voucher_by_number(voucher_number):
+    """获取一张凭证的所有分录，返回列表 [{account_code, account_name, debit, credit}, ...]"""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("""
+        SELECT account_code, account_name, debit_amount, credit_amount
+        FROM vouchers WHERE voucher_number = ?
+        ORDER BY id
+    """, (voucher_number,))
+    rows = c.fetchall()
+    conn.close()
+    return [
+        {"account_code": r[0], "account_name": r[1], "debit": r[2] or 0, "credit": r[3] or 0}
+        for r in rows
+    ]
+
+
+def get_voucher_info(voucher_number):
+    """获取凭证的基本信息（日期、摘要）"""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("""
+        SELECT voucher_date, summary FROM vouchers
+        WHERE voucher_number = ? LIMIT 1
+    """, (voucher_number,))
+    row = c.fetchone()
+    conn.close()
+    if row:
+        return {"date": row[0], "summary": row[1]}
+    return None
+
+
 @st.cache_data(ttl=60, show_spinner=False)
 def get_all_vouchers():
     """获取所有凭证，返回 DataFrame，缓存 1 分钟"""
@@ -4970,6 +5045,200 @@ with tab1:
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                         key=f"dl_{vnum}",
                     )
+
+                    # --- 删除凭证 ---
+                    st.markdown("---")
+                    del_cols = st.columns([1, 3])
+                    with del_cols[0]:
+                        if st.button("🗑️ 删除此凭证", key=f"del_{vnum}",
+                                     type="secondary", use_container_width=True):
+                            st.session_state[f"_confirm_del_{vnum}"] = True
+                    with del_cols[1]:
+                        if st.session_state.get(f"_confirm_del_{vnum}"):
+                            st.warning("⚠️ 确认要删除这张凭证吗？此操作不可撤销！")
+                            confirm_cols = st.columns(2)
+                            with confirm_cols[0]:
+                                if st.button("✅ 确认删除", key=f"confirm_del_{vnum}",
+                                             type="primary", use_container_width=True):
+                                    delete_voucher(vnum)
+                                    st.session_state.pop(f"_confirm_del_{vnum}", None)
+                                    st.success(f"凭证 {vnum} 已删除！")
+                                    st.rerun()
+                            with confirm_cols[1]:
+                                if st.button("❌ 取消", key=f"cancel_del_{vnum}",
+                                             use_container_width=True):
+                                    st.session_state.pop(f"_confirm_del_{vnum}", None)
+                                    st.rerun()
+
+                    # --- 修改凭证 ---
+                    st.markdown("---")
+                    edit_cols = st.columns([1, 3])
+                    with edit_cols[0]:
+                        if st.button("✏️ 修改此凭证", key=f"edit_{vnum}",
+                                     use_container_width=True):
+                            # 加载凭证数据到编辑模式
+                            lines = get_voucher_by_number(vnum)
+                            info = get_voucher_info(vnum)
+                            st.session_state[f"_edit_voucher_{vnum}"] = {
+                                "lines": lines,
+                                "date": info["date"] if info else vdate,
+                                "summary": info["summary"] if info else vsummary,
+                            }
+
+                    # 编辑界面
+                    edit_data = st.session_state.get(f"_edit_voucher_{vnum}")
+                    if edit_data:
+                        st.markdown("#### ✏️ 修改凭证")
+                        _dynamic_names_edit = get_account_names_dynamic()
+
+                        # 修改日期和摘要
+                        edit_c1, edit_c2 = st.columns([1, 2])
+                        with edit_c1:
+                            try:
+                                _edit_date_obj = datetime.strptime(edit_data["date"], "%Y-%m-%d")
+                            except (ValueError, TypeError):
+                                _edit_date_obj = datetime.now()
+                            new_date = st.date_input(
+                                "凭证日期", value=_edit_date_obj,
+                                key=f"edit_date_{vnum}",
+                            )
+                        with edit_c2:
+                            new_summary = st.text_input(
+                                "摘要", value=edit_data["summary"],
+                                key=f"edit_summary_{vnum}",
+                            )
+
+                        # 修改分录行
+                        st.markdown("##### 分录明细")
+                        edit_lines = edit_data["lines"]
+
+                        # 动态行数控制
+                        if f"_edit_row_count_{vnum}" not in st.session_state:
+                            st.session_state[f"_edit_row_count_{vnum}"] = len(edit_lines)
+
+                        row_count = st.session_state[f"_edit_row_count_{vnum}"]
+                        rc1, rc2 = st.columns([3, 1])
+                        with rc2:
+                            add_rows = st.number_input(
+                                "行数", min_value=2, max_value=20,
+                                value=max(row_count, 2), step=1,
+                                key=f"edit_rowcnt_{vnum}",
+                                label_visibility="collapsed",
+                            )
+                            if add_rows != row_count:
+                                st.session_state[f"_edit_row_count_{vnum}"] = int(add_rows)
+                                # 扩展或截断行
+                                while len(edit_lines) < int(add_rows):
+                                    edit_lines.append({
+                                        "account_code": "",
+                                        "account_name": "",
+                                        "debit": 0,
+                                        "credit": 0,
+                                })
+                                edit_lines = edit_lines[:int(add_rows)]
+                                edit_data["lines"] = edit_lines
+                                st.rerun()
+
+                        # 渲染分录编辑表格
+                        new_lines_data = []
+                        total_debit = 0
+                        total_credit = 0
+                        for i in range(len(edit_lines)):
+                            ec1, ec2, ec3, ec4, ec5 = st.columns([3, 2, 2, 1, 1])
+                            with ec1:
+                                # 构建当前选中值
+                                cur_val = None
+                                if edit_lines[i]["account_code"]:
+                                    cur_val = f'{edit_lines[i]["account_code"]} {edit_lines[i]["account_name"]}'
+                                idx_default = 0
+                                if cur_val and cur_val in _dynamic_names_edit:
+                                    idx_default = _dynamic_names_edit.index(cur_val)
+                                sel = st.selectbox(
+                                    f"科目{i+1}", _dynamic_names_edit,
+                                    index=idx_default, key=f"edit_acc_{vnum}_{i}",
+                                    label_visibility="collapsed",
+                                )
+                                if sel:
+                                    parts = sel.split(" ", 1)
+                                    acc_code = parts[0]
+                                    acc_name = parts[1] if len(parts) > 1 else ""
+                                else:
+                                    acc_code = ""
+                                    acc_name = ""
+                            with ec2:
+                                d_val = st.text_input(
+                                    "借方", value=f"{edit_lines[i]['debit']:,.2f}" if edit_lines[i]['debit'] else "",
+                                    key=f"edit_d_{vnum}_{i}",
+                                    placeholder="0.00",
+                                    label_visibility="collapsed",
+                                )
+                                d_num = float(str(d_val).replace(",", "").strip() or 0)
+                            with ec3:
+                                c_val = st.text_input(
+                                    "贷方", value=f"{edit_lines[i]['credit']:,.2f}" if edit_lines[i]['credit'] else "",
+                                    key=f"edit_c_{vnum}_{i}",
+                                    placeholder="0.00",
+                                    label_visibility="collapsed",
+                                )
+                                c_num = float(str(c_val).replace(",", "").strip() or 0)
+                            with ec4:
+                                if st.button("🗑", key=f"edit_del_row_{vnum}_{i}",
+                                             help="删除此行"):
+                                    if len(edit_lines) > 2:
+                                        edit_lines.pop(i)
+                                        st.session_state[f"_edit_row_count_{vnum}"] = len(edit_lines)
+                                        st.rerun()
+                            with ec5:
+                                st.write("")
+
+                            new_lines_data.append({
+                                "account_code": acc_code,
+                                "account_name": acc_name,
+                                "debit": d_num,
+                                "credit": c_num,
+                            })
+                            total_debit += d_num
+                            total_credit += c_num
+
+                        # 借贷平衡校验
+                        balance_ok = abs(total_debit - total_credit) < 0.01
+                        bal_color = "#2e7d32" if balance_ok else "#c62828"
+                        st.markdown(
+                            f'<div style="text-align:right; font-size:14px; '
+                            f'color:{bal_color}; font-weight:600; padding:4px 0;">'
+                            f'借方合计：{fmt_money(total_debit)} &nbsp;|&nbsp; '
+                            f'贷方合计：{fmt_money(total_credit)} &nbsp;|&nbsp; '
+                            f'{"✅ 平衡" if balance_ok else "❌ 不平衡"}'
+                            f'</div>',
+                            unsafe_allow_html=True,
+                        )
+
+                        # 保存 / 取消
+                        save_cols = st.columns(2)
+                        with save_cols[0]:
+                            if st.button("💾 保存修改", key=f"save_edit_{vnum}",
+                                         type="primary", use_container_width=True,
+                                         disabled=not balance_ok):
+                                new_date_str = new_date.strftime("%Y-%m-%d") if new_date else edit_data["date"]
+                                # 过滤掉空行
+                                filtered_lines = [l for l in new_lines_data if l["account_code"]]
+                                if len(filtered_lines) >= 2 and abs(
+                                    sum(l["debit"] for l in filtered_lines) -
+                                    sum(l["credit"] for l in filtered_lines)
+                                ) < 0.01:
+                                    update_voucher(vnum, new_date_str, new_summary, filtered_lines)
+                                    st.session_state.pop(f"_edit_voucher_{vnum}", None)
+                                    st.session_state.pop(f"_edit_row_count_{vnum}", None)
+                                    st.success(f"✅ 凭证 {vnum} 已修改成功！")
+                                    st.rerun()
+                                else:
+                                    st.error("保存失败：请确保至少 2 行分录且借贷平衡。")
+                        with save_cols[1]:
+                            if st.button("❌ 取消修改", key=f"cancel_edit_{vnum}",
+                                         use_container_width=True):
+                                st.session_state.pop(f"_edit_voucher_{vnum}", None)
+                                st.session_state.pop(f"_edit_row_count_{vnum}", None)
+                                st.rerun()
 
     # --- 明细账 ---
     with sub4:
