@@ -892,6 +892,16 @@ def init_database():
             credit_amount REAL DEFAULT 0
         )
     """)
+    # 凭证审核相关字段（ALTER TABLE 兼容旧数据库）
+    for _col, _type in [
+        ("audit_status", "TEXT DEFAULT '未审核'"),
+        ("auditor", "TEXT DEFAULT ''"),
+        ("audit_date", "TEXT DEFAULT ''"),
+    ]:
+        try:
+            c.execute(f"ALTER TABLE vouchers ADD COLUMN {_col} {_type}")
+        except Exception:
+            pass  # 列已存在
 
     # 产品档案表：产成品主数据
     c.execute("""
@@ -1658,6 +1668,127 @@ def get_all_vouchers():
     df = pd.read_sql_query("SELECT * FROM vouchers ORDER BY id", conn)
     conn.close()
     return df
+
+
+# ============================================================
+# 凭证审核功能（对标用友U8/金蝶K3 制单→审核→记账 三段式内控）
+# ============================================================
+
+def get_voucher_audit_status(voucher_number):
+    """获取单张凭证的审核状态"""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("""
+        SELECT audit_status, auditor, audit_date
+        FROM vouchers WHERE voucher_number = ? LIMIT 1
+    """, (voucher_number,))
+    row = c.fetchone()
+    conn.close()
+    if row:
+        return {"status": row[0] or "未审核", "auditor": row[1] or "", "audit_date": row[2] or ""}
+    return {"status": "未审核", "auditor": "", "audit_date": ""}
+
+
+def audit_voucher(voucher_number, auditor_name):
+    """审核一张凭证（未审核 → 已审核）
+    审核后凭证锁定，不能修改/删除
+    """
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    # 检查凭证是否存在且未审核
+    c.execute("SELECT audit_status FROM vouchers WHERE voucher_number = ? LIMIT 1", (voucher_number,))
+    row = c.fetchone()
+    if not row:
+        conn.close()
+        return False, "凭证不存在"
+    current_status = row[0] or "未审核"
+    if current_status == "已审核":
+        conn.close()
+        return False, "该凭证已审核，无需重复审核"
+    from datetime import datetime
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    c.execute("""
+        UPDATE vouchers SET audit_status = '已审核', auditor = ?, audit_date = ?
+        WHERE voucher_number = ?
+    """, (auditor_name, now_str, voucher_number))
+    conn.commit()
+    conn.close()
+    get_all_vouchers.clear()
+    return True, f"凭证 {voucher_number} 审核通过"
+
+
+def unaudit_voucher(voucher_number):
+    """反审核一张凭证（已审核 → 未审核）
+    取消审核后凭证可修改/删除
+    """
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT audit_status FROM vouchers WHERE voucher_number = ? LIMIT 1", (voucher_number,))
+    row = c.fetchone()
+    if not row:
+        conn.close()
+        return False, "凭证不存在"
+    current_status = row[0] or "未审核"
+    if current_status != "已审核":
+        conn.close()
+        return False, "该凭证未审核，无需反审核"
+    c.execute("""
+        UPDATE vouchers SET audit_status = '未审核', auditor = '', audit_date = ''
+        WHERE voucher_number = ?
+    """, (voucher_number,))
+    conn.commit()
+    conn.close()
+    get_all_vouchers.clear()
+    return True, f"凭证 {voucher_number} 已取消审核"
+
+
+def batch_audit_vouchers(voucher_numbers, auditor_name):
+    """批量审核多张凭证"""
+    success_count = 0
+    fail_count = 0
+    messages = []
+    for vnum in voucher_numbers:
+        ok, msg = audit_voucher(vnum, auditor_name)
+        if ok:
+            success_count += 1
+        else:
+            fail_count += 1
+            messages.append(f"{vnum}: {msg}")
+    summary = f"批量审核完成：成功 {success_count} 张"
+    if fail_count:
+        summary += f"，失败 {fail_count} 张"
+    return True, summary
+
+
+def get_pending_audit_vouchers():
+    """获取所有待审核凭证列表"""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("""
+        SELECT DISTINCT voucher_number, voucher_date, summary
+        FROM vouchers
+        WHERE audit_status IS NULL OR audit_status = '' OR audit_status = '未审核'
+        ORDER BY voucher_date, voucher_number
+    """)
+    rows = c.fetchall()
+    conn.close()
+    return [{"number": r[0], "date": r[1], "summary": r[2]} for r in rows]
+
+
+def get_audited_vouchers():
+    """获取所有已审核凭证列表"""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("""
+        SELECT DISTINCT voucher_number, voucher_date, summary, auditor, audit_date
+        FROM vouchers
+        WHERE audit_status = '已审核'
+        ORDER BY audit_date DESC, voucher_number
+    """)
+    rows = c.fetchall()
+    conn.close()
+    return [{"number": r[0], "date": r[1], "summary": r[2],
+             "auditor": r[3] or "", "audit_date": r[4] or ""} for r in rows]
 
 
 @st.cache_data(ttl=30, show_spinner=False)
@@ -4772,9 +4903,9 @@ with _grp_bi:
 # ============================================================
 with tab1:
     st.header("📝 总账记账")
-    st.caption("期初余额 · 录入凭证 · 凭证查询 · 明细账 · 科目管理 · 期末结转 ｜ 完全离线，无需 API")
+    st.caption("期初余额 · 录入凭证 · 凭证查询 · ✅凭证审核 · 明细账 · 科目管理 · 🔄 期末结转 ｜ 完全离线，无需 API")
 
-    sub1, sub2, sub3, sub4, sub5, sub6 = st.tabs(["期初余额", "录入凭证", "凭证查询", "明细账", "科目管理", "🔄 期末结转"])
+    sub1, sub2, sub3, sub3a, sub4, sub5, sub6 = st.tabs(["期初余额", "录入凭证", "凭证查询", "✅ 凭证审核", "明细账", "科目管理", "🔄 期末结转"])
 
     # --- 期初余额 ---
     with sub1:
@@ -5387,17 +5518,31 @@ with tab1:
                 vdate = vdf.iloc[0]["voucher_date"]
                 vsummary = vdf.iloc[0]["summary"]
 
+                # 获取审核状态
+                _v_audit_status = vdf.iloc[0].get("audit_status", "未审核") or "未审核"
+                _v_auditor = vdf.iloc[0].get("auditor", "") or ""
+                _v_audit_date = vdf.iloc[0].get("audit_date", "") or ""
+                _audit_icon = "🟢" if _v_audit_status == "已审核" else "🟡"
+                _audit_label = f"{_audit_icon} {_v_audit_status}" if _v_audit_status == "已审核" else "🟡 未审核"
+                _is_audited = (_v_audit_status == "已审核")
+
                 d_total = vdf["debit_amount"].sum()
                 c_total = vdf["credit_amount"].sum()
                 balanced = "✅" if abs(d_total - c_total) < 0.01 else "❌"
 
-                with st.expander(f"{vnum} | {vdate} | {vsummary} | 借 {d_total:,.2f} = 贷 {c_total:,.2f} {balanced}"):
+                with st.expander(f"{_audit_label} | {vnum} | {vdate} | {vsummary} | 借 {d_total:,.2f} = 贷 {c_total:,.2f} {balanced}"):
                     display_df = vdf[["account_name", "debit_amount", "credit_amount"]].copy()
                     display_df.columns = ["科目", "借方金额", "贷方金额"]
                     # 加合计行
                     display_df.loc[len(display_df)] = ["合计", d_total, c_total]
                     display_df = fmt_money_df(display_df, ["借方金额", "贷方金额"])
                     st.dataframe(display_df, use_container_width=True, hide_index=True)
+
+                    # 显示审核信息
+                    if _is_audited:
+                        st.info(f"✅ 已审核 ｜ 审核人：{_v_auditor}  ｜  审核时间：{_v_audit_date}")
+                    else:
+                        st.caption("🟡 未审核")
 
                     st.download_button(
                         label=f"📥 下载此凭证（{vnum}）",
@@ -5411,10 +5556,15 @@ with tab1:
                     st.markdown("---")
                     del_cols = st.columns([1, 3])
                     with del_cols[0]:
+                        _del_disabled = _is_audited
                         if st.button("🗑️ 删除此凭证", key=f"del_{vnum}",
-                                     type="secondary", use_container_width=True):
+                                     type="secondary", use_container_width=True,
+                                     disabled=_del_disabled,
+                                     help="已审核凭证不可删除，请先反审核" if _del_disabled else None):
                             st.session_state[f"_confirm_del_{vnum}"] = True
                     with del_cols[1]:
+                        if _is_audited:
+                            st.caption("🔒 已审核凭证不可删除，请先在「凭证审核」中反审核")
                         if st.session_state.get(f"_confirm_del_{vnum}"):
                             st.warning("⚠️ 确认要删除这张凭证吗？此操作不可撤销！")
                             confirm_cols = st.columns(2)
@@ -5435,8 +5585,11 @@ with tab1:
                     st.markdown("---")
                     edit_cols = st.columns([1, 3])
                     with edit_cols[0]:
+                        _edit_disabled = _is_audited
                         if st.button("✏️ 修改此凭证", key=f"edit_{vnum}",
-                                     use_container_width=True):
+                                     use_container_width=True,
+                                     disabled=_edit_disabled,
+                                     help="已审核凭证不可修改，请先反审核" if _edit_disabled else None):
                             # 加载凭证数据到编辑模式
                             lines = get_voucher_by_number(vnum)
                             info = get_voucher_info(vnum)
@@ -5445,6 +5598,9 @@ with tab1:
                                 "date": info["date"] if info else vdate,
                                 "summary": info["summary"] if info else vsummary,
                             }
+                    with edit_cols[1]:
+                        if _is_audited:
+                            st.caption("🔒 已审核凭证不可修改，请先在「凭证审核」中反审核")
 
                     # 编辑界面
                     edit_data = st.session_state.get(f"_edit_voucher_{vnum}")
@@ -5600,6 +5756,170 @@ with tab1:
                                 st.session_state.pop(f"_edit_voucher_{vnum}", None)
                                 st.session_state.pop(f"_edit_row_count_{vnum}", None)
                                 st.rerun()
+
+    # --- 凭证审核 ---
+    with sub3a:
+        st.subheader("✅ 凭证审核")
+        st.caption("制单 → 审核 → 记账 ｜ 审核后凭证锁定不可修改，需反审核后方可编辑")
+
+        _audit_df = get_all_vouchers()
+        if _audit_df.empty:
+            st.info("暂无凭证记录。请先在「录入凭证」中添加。")
+        else:
+            # 获取当前用户名作为审核人
+            _auditor = st.session_state.get("display_name", "") or st.session_state.get("username", "")
+
+            # 统计
+            _audit_voucher_numbers = _audit_df["voucher_number"].unique()
+            _pending_list = []
+            _audited_list = []
+            for _vn in _audit_voucher_numbers:
+                _vdf = _audit_df[_audit_df["voucher_number"] == _vn]
+                _status = _vdf.iloc[0].get("audit_status", "未审核") or "未审核"
+                if _status == "已审核":
+                    _audited_list.append(_vn)
+                else:
+                    _pending_list.append(_vn)
+
+            _stat_c1, _stat_c2, _stat_c3 = st.columns(3)
+            with _stat_c1:
+                st.metric("凭证总数", len(_audit_voucher_numbers))
+            with _stat_c2:
+                st.metric("待审核", len(_pending_list))
+            with _stat_c3:
+                st.metric("已审核", len(_audited_list))
+
+            st.markdown("---")
+
+            # 审核操作标签页
+            _audit_tab1, _audit_tab2, _audit_tab3 = st.tabs(["📋 待审核凭证", "✅ 已审核凭证", "⚡ 批量审核"])
+
+            # --- 待审核凭证列表 ---
+            with _audit_tab1:
+                if not _pending_list:
+                    st.success("🎉 所有凭证已审核完毕！")
+                else:
+                    for _vn in _pending_list:
+                        _vdf = _audit_df[_audit_df["voucher_number"] == _vn]
+                        _vdate = _vdf.iloc[0]["voucher_date"]
+                        _vsummary = _vdf.iloc[0]["summary"]
+                        _d_total = _vdf["debit_amount"].sum()
+                        _c_total = _vdf["credit_amount"].sum()
+                        _balanced = "✅" if abs(_d_total - _c_total) < 0.01 else "❌"
+
+                        with st.expander(f"🟡 {_vn} | {_vdate} | {_vsummary} | 借 {_d_total:,.2f} = 贷 {_c_total:,.2f} {_balanced}"):
+                            _disp_df = _vdf[["account_name", "debit_amount", "credit_amount"]].copy()
+                            _disp_df.columns = ["科目", "借方金额", "贷方金额"]
+                            _disp_df.loc[len(_disp_df)] = ["合计", _d_total, _c_total]
+                            _disp_df = fmt_money_df(_disp_df, ["借方金额", "贷方金额"])
+                            st.dataframe(_disp_df, use_container_width=True, hide_index=True)
+
+                            if not _balanced:
+                                st.error("❌ 凭证借贷不平衡，无法审核！")
+                            else:
+                                _ac1, _ac2 = st.columns([1, 2])
+                                with _ac1:
+                                    if st.button("✅ 审核通过", key=f"audit_{_vn}",
+                                                 type="primary", use_container_width=True):
+                                        _ok, _msg = audit_voucher(_vn, _auditor)
+                                        if _ok:
+                                            st.success(_msg)
+                                            st.rerun()
+                                        else:
+                                            st.error(_msg)
+                                with _ac2:
+                                    st.caption(f"审核人：{_auditor}")
+
+            # --- 已审核凭证列表 ---
+            with _audit_tab2:
+                if not _audited_list:
+                    st.info("暂无已审核凭证。")
+                else:
+                    for _vn in _audited_list:
+                        _vdf = _audit_df[_audit_df["voucher_number"] == _vn]
+                        _vdate = _vdf.iloc[0]["voucher_date"]
+                        _vsummary = _vdf.iloc[0]["summary"]
+                        _auditor_name = _vdf.iloc[0].get("auditor", "") or ""
+                        _audit_dt = _vdf.iloc[0].get("audit_date", "") or ""
+                        _d_total = _vdf["debit_amount"].sum()
+                        _c_total = _vdf["credit_amount"].sum()
+                        _balanced = "✅" if abs(_d_total - _c_total) < 0.01 else "❌"
+
+                        with st.expander(f"🟢 {_vn} | {_vdate} | {_vsummary} | 借 {_d_total:,.2f} = 贷 {_c_total:,.2f} {_balanced} | 审核人：{_auditor_name} {_audit_dt}"):
+                            _disp_df = _vdf[["account_name", "debit_amount", "credit_amount"]].copy()
+                            _disp_df.columns = ["科目", "借方金额", "贷方金额"]
+                            _disp_df.loc[len(_disp_df)] = ["合计", _d_total, _c_total]
+                            _disp_df = fmt_money_df(_disp_df, ["借方金额", "贷方金额"])
+                            st.dataframe(_disp_df, use_container_width=True, hide_index=True)
+
+                            st.markdown(f"**审核人**：{_auditor_name}  ｜  **审核时间**：{_audit_dt}")
+
+                            _uc1, _uc2 = st.columns([1, 2])
+                            with _uc1:
+                                if st.button("🔄 反审核", key=f"unaudit_{_vn}",
+                                             type="secondary", use_container_width=True):
+                                    _ok, _msg = unaudit_voucher(_vn)
+                                    if _ok:
+                                        st.success(_msg)
+                                        st.rerun()
+                                    else:
+                                        st.error(_msg)
+                            with _uc2:
+                                st.caption("反审核后凭证恢复为未审核状态，可修改/删除")
+
+            # --- 批量审核 ---
+            with _audit_tab3:
+                if not _pending_list:
+                    st.success("🎉 没有待审核的凭证！")
+                else:
+                    st.markdown("#### ⚡ 批量审核")
+                    st.caption(f"当前待审核凭证 {len(_pending_list)} 张")
+
+                    # 多选凭证
+                    _batch_options = []
+                    for _vn in _pending_list:
+                        _vdf = _audit_df[_audit_df["voucher_number"] == _vn]
+                        _vdate = _vdf.iloc[0]["voucher_date"]
+                        _vsummary = _vdf.iloc[0]["summary"]
+                        _batch_options.append(f"{_vn} | {_vdate} | {_vsummary}")
+
+                    _selected_batch = st.multiselect(
+                        "选择要审核的凭证（可多选）",
+                        _batch_options,
+                        key="batch_audit_select",
+                    )
+
+                    if _selected_batch:
+                        st.info(f"已选择 {len(_selected_batch)} 张凭证待审核")
+                        if st.button("✅ 批量审核选中凭证", type="primary",
+                                     key="batch_audit_btn", use_container_width=True):
+                            _batch_nums = []
+                            for _sel in _selected_batch:
+                                _vn = _sel.split(" | ")[0] if " | " in _sel else _sel
+                                _batch_nums.append(_vn)
+                            _ok, _msg = batch_audit_vouchers(_batch_nums, _auditor)
+                            st.success(_msg)
+                            st.rerun()
+
+                    # 全选快捷按钮
+                    st.markdown("---")
+                    _bc1, _bc2 = st.columns(2)
+                    with _bc1:
+                        if st.button("📋 全选待审核", key="batch_select_all"):
+                            st.session_state["batch_audit_select"] = _batch_options
+                            st.rerun()
+                    with _bc2:
+                        if st.button("🧹 清空选择", key="batch_clear_all"):
+                            st.session_state["batch_audit_select"] = []
+                            st.rerun()
+
+                    # 一键审核全部
+                    st.markdown("---")
+                    if st.button("🔥 一键审核全部待审核凭证", type="primary",
+                                 key="audit_all_btn", use_container_width=True):
+                        _ok, _msg = batch_audit_vouchers(_pending_list, _auditor)
+                        st.success(_msg)
+                        st.rerun()
 
     # --- 明细账 ---
     with sub4:
