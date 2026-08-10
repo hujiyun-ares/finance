@@ -3788,7 +3788,12 @@ def get_account_ledger(account_code):
 # 第 4 部分：主界面 —— 八个 Tab
 # ============================================================
 
-init_database()
+try:
+    init_database()
+except Exception as _init_err:
+    st.error(f"⚠️ 数据库初始化失败: {_init_err}")
+    st.info(f"数据库模式: {'PostgreSQL' if _USE_POSTGRES else 'SQLite'} | DB_PATH: {DB_PATH}")
+    st.stop()
 
 # --- 用户信息栏 ---
 _header_col1, _header_col2, _header_col3 = st.columns([6, 2, 1])
@@ -3965,6 +3970,22 @@ with tab1:
     # --- 录入凭证 ---
     with sub2:
         st.subheader("录入记账凭证")
+
+        # === 调试信息：显示数据库连接状态 ===
+        try:
+            _test_conn = sqlite3.connect(DB_PATH)
+            _test_cur = _test_conn.cursor()
+            _test_cur.execute("SELECT count(*) FROM vouchers")
+            _test_cnt = _test_cur.fetchone()[0]
+            _test_cur.execute("SELECT count(*) FROM custom_accounts")
+            _custom_cnt = _test_cur.fetchone()[0]
+            _test_conn.close()
+            _db_mode = "PostgreSQL (Supabase)" if _USE_POSTGRES else "SQLite (本地)"
+            st.caption(f"📊 数据库: {_db_mode} | 凭证: {_test_cnt} 条 | 自定义科目: {_custom_cnt} 条")
+        except Exception as _db_err:
+            st.error(f"⚠️ 数据库连接错误: {_db_err}")
+            st.info("如果是云端部署，请检查 Supabase 连接配置是否正确。")
+            st.stop()
 
         # 凭证金额专用回调：Enter 格式化 + 最后一行自动新增行
         def _voucher_money_cb(key):
