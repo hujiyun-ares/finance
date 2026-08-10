@@ -351,6 +351,21 @@ def init_auth_db():
             created_at TEXT
         )
     """)
+    # 多公司管理表：一个用户下可以管理多家公司
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS user_companies (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT NOT NULL,
+            company_code TEXT NOT NULL,
+            company_name TEXT NOT NULL,
+            tax_id TEXT,
+            address TEXT,
+            phone TEXT,
+            is_default INTEGER DEFAULT 0,
+            created_at TEXT,
+            UNIQUE(username, company_code)
+        )
+    """)
     conn.commit()
     conn.close()
 
@@ -369,11 +384,21 @@ def register_user(username, password, display_name, company):
         conn.close()
         return False, "用户名已存在"
     from datetime import datetime
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     c.execute("""
         INSERT INTO users (username, password_hash, display_name, company, created_at)
         VALUES (?, ?, ?, ?, ?)
-    """, (username, hash_password(password), display_name, company,
-          datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+    """, (username, hash_password(password), display_name, company, now_str))
+    # 注册时同时创建第一家公司
+    if company:
+        company_code = "CO001"
+    else:
+        company = "默认公司"
+        company_code = "CO001"
+    c.execute("""
+        INSERT INTO user_companies (username, company_code, company_name, is_default, created_at)
+        VALUES (?, ?, ?, 1, ?)
+    """, (username, company_code, company, now_str))
     conn.commit()
     conn.close()
     return True, "注册成功"
@@ -386,16 +411,127 @@ def verify_user(username, password):
     c.execute("SELECT username, password_hash, display_name, company FROM users WHERE username = ?",
               (username,))
     row = c.fetchone()
-    conn.close()
     if not row:
+        conn.close()
         return False, "用户名不存在"
     if row[1] != hash_password(password):
+        conn.close()
         return False, "密码错误"
-    return True, {"username": row[0], "display_name": row[2], "company": row[3]}
+    # 获取该用户的所有公司
+    c.execute("""
+        SELECT company_code, company_name, is_default
+        FROM user_companies WHERE username = ?
+        ORDER BY is_default DESC, id ASC
+    """, (username,))
+    companies = [{"code": r[0], "name": r[1], "is_default": bool(r[2])} for r in c.fetchall()]
+    conn.close()
+    return True, {"username": row[0], "display_name": row[2], "company": row[3], "companies": companies}
 
 
-def get_user_db_path(username):
-    """获取用户专属数据库路径（固定在 ~/.finance_erp_data/ 目录下）"""
+def create_company(username, company_code, company_name, tax_id="", address="", phone=""):
+    """为用户新建一家公司"""
+    conn = sqlite3.connect(AUTH_DB)
+    c = conn.cursor()
+    from datetime import datetime
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        c.execute("""
+            INSERT INTO user_companies (username, company_code, company_name, tax_id, address, phone, is_default, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, 0, ?)
+        """, (username, company_code, company_name, tax_id, address, phone, now_str))
+        conn.commit()
+        conn.close()
+        return True, "公司创建成功"
+    except Exception as e:
+        conn.close()
+        if "UNIQUE" in str(e):
+            return False, "公司编码已存在，请换一个"
+        return False, str(e)
+
+
+def get_user_companies(username):
+    """获取用户的所有公司列表"""
+    conn = sqlite3.connect(AUTH_DB)
+    c = conn.cursor()
+    c.execute("""
+        SELECT company_code, company_name, tax_id, address, phone, is_default, created_at
+        FROM user_companies WHERE username = ?
+        ORDER BY is_default DESC, id ASC
+    """, (username,))
+    rows = c.fetchall()
+    conn.close()
+    return [
+        {"code": r[0], "name": r[1], "tax_id": r[2] or "", "address": r[3] or "",
+         "phone": r[4] or "", "is_default": bool(r[5]), "created_at": r[6] or ""}
+        for r in rows
+    ]
+
+
+def delete_company(username, company_code):
+    """删除一家公司（不能删除默认公司或最后一家公司）"""
+    conn = sqlite3.connect(AUTH_DB)
+    c = conn.cursor()
+    # 检查是否是最后一家公司
+    c.execute("SELECT COUNT(*) FROM user_companies WHERE username = ?", (username,))
+    count = c.fetchone()[0]
+    if count <= 1:
+        conn.close()
+        return False, "至少保留一家公司，无法删除"
+    # 检查是否是默认公司
+    c.execute("SELECT is_default FROM user_companies WHERE username = ? AND company_code = ?",
+              (username, company_code))
+    row = c.fetchone()
+    if not row:
+        conn.close()
+        return False, "公司不存在"
+    if row[0]:
+        conn.close()
+        return False, "不能删除默认公司，请先切换到其他公司"
+    c.execute("DELETE FROM user_companies WHERE username = ? AND company_code = ?",
+              (username, company_code))
+    conn.commit()
+    conn.close()
+    return True, "公司已删除"
+
+
+def update_company(username, company_code, company_name=None, tax_id=None, address=None, phone=None):
+    """更新公司信息"""
+    conn = sqlite3.connect(AUTH_DB)
+    c = conn.cursor()
+    updates = []
+    params = []
+    if company_name is not None:
+        updates.append("company_name = ?")
+        params.append(company_name)
+    if tax_id is not None:
+        updates.append("tax_id = ?")
+        params.append(tax_id)
+    if address is not None:
+        updates.append("address = ?")
+        params.append(address)
+    if phone is not None:
+        updates.append("phone = ?")
+        params.append(phone)
+    if not updates:
+        conn.close()
+        return False, "没有需要更新的字段"
+    params.extend([username, company_code])
+    c.execute(f"""
+        UPDATE user_companies SET {', '.join(updates)}
+        WHERE username = ? AND company_code = ?
+    """, params)
+    conn.commit()
+    conn.close()
+    return True, "公司信息已更新"
+
+
+def get_user_db_path(username, company_code=None):
+    """获取用户专属数据库路径
+    如果提供了 company_code，则每家公司有独立数据库
+    否则回退到旧版单数据库路径（兼容）
+    """
+    if company_code:
+        return str(_DATA_DIR / f"erp_data_{username}_{company_code}.db")
     return str(_DATA_DIR / f"erp_data_{username}.db")
 
 
@@ -422,6 +558,12 @@ def login_page():
                         st.session_state["username"] = username
                         st.session_state["display_name"] = result["display_name"]
                         st.session_state["company"] = result["company"]
+                        st.session_state["user_companies"] = result.get("companies", [])
+                        # 自动选择默认公司
+                        if result.get("companies"):
+                            default_co = result["companies"][0]
+                            st.session_state["current_company_code"] = default_co["code"]
+                            st.session_state["current_company_name"] = default_co["name"]
                         st.rerun()
                     else:
                         st.error(result)
@@ -450,7 +592,7 @@ def login_page():
                         st.error(msg)
 
     st.markdown("---")
-    st.caption("每个用户拥有独立的数据库，数据互不干扰。")
+    st.caption("一个账号可管理多家公司，每家公司拥有独立的财务数据库。")
 
 
 # ============================================================
@@ -483,7 +625,46 @@ if not st.session_state["logged_in"]:
 
 # 已登录 → 设置用户专属数据库
 _username = st.session_state.get("username", "default")
-DB_PATH = get_user_db_path(_username)
+
+# === 多公司管理：旧用户迁移 ===
+# 如果用户登录后没有公司信息（旧用户首次登录），自动创建默认公司
+if not st.session_state.get("user_companies"):
+    _existing_companies = get_user_companies(_username)
+    if _existing_companies:
+        # 数据库中已有公司记录但 session_state 中没有
+        st.session_state["user_companies"] = _existing_companies
+        _default_co = _existing_companies[0]
+        st.session_state["current_company_code"] = _default_co["code"]
+        st.session_state["current_company_name"] = _default_co["name"]
+    else:
+        # 旧用户没有公司记录，自动创建一家默认公司
+        _old_company_name = st.session_state.get("company", "") or "默认公司"
+        create_company(_username, "CO001", _old_company_name)
+        _existing_companies = get_user_companies(_username)
+        st.session_state["user_companies"] = _existing_companies
+        if _existing_companies:
+            _default_co = _existing_companies[0]
+            st.session_state["current_company_code"] = _default_co["code"]
+            st.session_state["current_company_name"] = _default_co["name"]
+
+# 根据当前选中的公司设置 DB_PATH
+_current_co_code = st.session_state.get("current_company_code")
+_current_co_name = st.session_state.get("current_company_name", "")
+
+# 如果没有当前公司但有旧数据库文件，使用旧路径（兼容）
+if _current_co_code:
+    DB_PATH = get_user_db_path(_username, _current_co_code)
+    # 检查是否有旧数据库需要迁移
+    _old_db = get_user_db_path(_username)
+    import os as _os_mod
+    if _os_mod.path.exists(_old_db) and not _os_mod.path.exists(DB_PATH):
+        import shutil as _shutil_mod
+        try:
+            _shutil_mod.copy2(_old_db, DB_PATH)
+        except Exception:
+            pass
+else:
+    DB_PATH = get_user_db_path(_username)
 
 
 # ============================================================
@@ -4386,22 +4567,161 @@ if not st.session_state.get("_db_initialized"):
         st.stop()
 
 # --- 用户信息栏 ---
-_header_col1, _header_col2, _header_col3 = st.columns([6, 2, 1])
+_header_col1, _header_col2, _header_col3 = st.columns([5, 3, 2])
 with _header_col1:
     st.title("💰 财务 ERP 系统")
     _disp = st.session_state.get("display_name", "")
-    _comp = st.session_state.get("company", "")
+    _comp_name = st.session_state.get("current_company_name", "")
     st.caption(f"离线记账 · 自动报表 · AI 智能问答 · 库存 · 商品 · CRM · 订单 · BI")
 with _header_col2:
     if _disp:
-        st.info(f"👤 {_disp}" + (f"  |  🏢 {_comp}" if _comp else ""))
+        st.info(f"👤 {_disp}")
+    # 公司切换器
+    _user_companies = st.session_state.get("user_companies", [])
+    _current_co_code = st.session_state.get("current_company_code", "")
+    if _user_companies:
+        _co_options = [f"{c['code']} | {c['name']}" for c in _user_companies]
+        _current_idx = 0
+        for i, c in enumerate(_user_companies):
+            if c["code"] == _current_co_code:
+                _current_idx = i
+                break
+        _selected_co = st.selectbox(
+            "🏢 切换公司",
+            _co_options,
+            index=_current_idx,
+            key="company_switcher",
+            label_visibility="collapsed",
+        )
+        _selected_co_code = _selected_co.split(" | ")[0] if " | " in _selected_co else _selected_co
+        if _selected_co_code != _current_co_code:
+            # 切换公司：重置数据库初始化标志并刷新
+            st.session_state["current_company_code"] = _selected_co_code
+            st.session_state["current_company_name"] = _selected_co.split(" | ", 1)[1] if " | " in _selected_co else ""
+            st.session_state["_db_initialized"] = False
+            st.rerun()
 with _header_col3:
-    if st.button("🚪 退出登录", key="logout_btn"):
-        for k in list(st.session_state.keys()):
-            del st.session_state[k]
-        st.rerun()
+    _col_mgmt, _col_logout = st.columns(2)
+    with _col_mgmt:
+        if st.button("🏢\n公司管理", key="company_mgmt_btn", use_container_width=True):
+            st.session_state["_show_company_mgmt"] = not st.session_state.get("_show_company_mgmt", False)
+            st.rerun()
+    with _col_logout:
+        if st.button("🚪 退出", key="logout_btn", use_container_width=True):
+            for k in list(st.session_state.keys()):
+                del st.session_state[k]
+            st.rerun()
 
-st.markdown("---")
+# --- 公司管理弹窗 ---
+if st.session_state.get("_show_company_mgmt"):
+    _mg_username = st.session_state.get("username", "default")
+    st.markdown("### 🏢 公司管理")
+
+    _mg_tab1, _mg_tab2, _mg_tab3 = st.tabs(["📋 公司列表", "➕ 新建公司", "✏️ 编辑公司"])
+
+    with _mg_tab1:
+        _companies_list = get_user_companies(_mg_username)
+        if _companies_list:
+            _list_data = []
+            for c in _companies_list:
+                _list_data.append({
+                    "公司编码": c["code"],
+                    "公司名称": c["name"],
+                    "税号": c["tax_id"],
+                    "联系电话": c["phone"],
+                    "是否默认": "✅ 是" if c["is_default"] else "—",
+                    "创建时间": c["created_at"],
+                })
+            st.dataframe(_list_data, use_container_width=True, hide_index=True)
+
+            # 删除公司
+            st.markdown("---")
+            st.markdown("#### 🗑️ 删除公司")
+            _del_options = [f"{c['code']} | {c['name']}" for c in _companies_list]
+            _del_selected = st.selectbox("选择要删除的公司", _del_options, key="del_company_sel")
+            if st.button("确认删除", key="del_company_btn", type="secondary"):
+                _del_code = _del_selected.split(" | ")[0] if " | " in _del_selected else _del_selected
+                _ok, _msg = delete_company(_mg_username, _del_code)
+                if _ok:
+                    st.success(_msg)
+                    # 更新 session_state
+                    st.session_state["user_companies"] = get_user_companies(_mg_username)
+                    # 如果删除的是当前公司，切到默认公司
+                    if _del_code == st.session_state.get("current_company_code"):
+                        _remaining = st.session_state["user_companies"]
+                        if _remaining:
+                            st.session_state["current_company_code"] = _remaining[0]["code"]
+                            st.session_state["current_company_name"] = _remaining[0]["name"]
+                        st.session_state["_db_initialized"] = False
+                    st.rerun()
+                else:
+                    st.error(_msg)
+        else:
+            st.info("暂无公司记录")
+
+    with _mg_tab2:
+        with st.form("create_company_form"):
+            _new_code = st.text_input("公司编码 *", placeholder="如：CO002", key="new_co_code")
+            _new_name = st.text_input("公司名称 *", placeholder="如：XX科技有限公司", key="new_co_name")
+            _new_tax = st.text_input("统一社会信用代码（税号）", placeholder="选填", key="new_co_tax")
+            _new_addr = st.text_input("公司地址", placeholder="选填", key="new_co_addr")
+            _new_phone = st.text_input("联系电话", placeholder="选填", key="new_co_phone")
+            _new_submit = st.form_submit_button("➕ 创建公司")
+
+            if _new_submit:
+                if not _new_code or not _new_name:
+                    st.error("公司编码和名称不能为空")
+                else:
+                    _ok, _msg = create_company(_mg_username, _new_code.strip(), _new_name.strip(),
+                                               _new_tax.strip(), _new_addr.strip(), _new_phone.strip())
+                    if _ok:
+                        st.success(_msg)
+                        st.session_state["user_companies"] = get_user_companies(_mg_username)
+                        st.rerun()
+                    else:
+                        st.error(_msg)
+
+    with _mg_tab3:
+        _edit_companies = get_user_companies(_mg_username)
+        if _edit_companies:
+            _edit_options = [f"{c['code']} | {c['name']}" for c in _edit_companies]
+            _edit_selected = st.selectbox("选择公司", _edit_options, key="edit_company_sel")
+            _edit_code = _edit_selected.split(" | ")[0] if " | " in _edit_selected else _edit_selected
+
+            # 找到当前选中公司
+            _edit_co = None
+            for c in _edit_companies:
+                if c["code"] == _edit_code:
+                    _edit_co = c
+                    break
+
+            if _edit_co:
+                with st.form("edit_company_form"):
+                    _ed_name = st.text_input("公司名称", value=_edit_co["name"], key="ed_co_name")
+                    _ed_tax = st.text_input("税号", value=_edit_co["tax_id"], key="ed_co_tax")
+                    _ed_addr = st.text_input("公司地址", value=_edit_co["address"], key="ed_co_addr")
+                    _ed_phone = st.text_input("联系电话", value=_edit_co["phone"], key="ed_co_phone")
+                    _ed_submit = st.form_submit_button("💾 保存修改")
+
+                    if _ed_submit:
+                        _ok, _msg = update_company(_mg_username, _edit_code,
+                                                   company_name=_ed_name.strip(),
+                                                   tax_id=_ed_tax.strip(),
+                                                   address=_ed_addr.strip(),
+                                                   phone=_ed_phone.strip())
+                        if _ok:
+                            st.success(_msg)
+                            # 更新 session_state 中的公司名称
+                            if _edit_code == st.session_state.get("current_company_code"):
+                                st.session_state["current_company_name"] = _ed_name.strip()
+                            st.session_state["user_companies"] = get_user_companies(_mg_username)
+                            st.rerun()
+                        else:
+                            st.error(_msg)
+        else:
+            st.info("暂无可编辑的公司")
+
+    st.markdown("---")
 
 tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs(["📝 模块一：记账（免费）", "📊 模块二：报表（免费）", "🤖 模块三：AI 问答（需 API）", "📦 模块四：库存管理（免费）", "🏪 模块五：多平台商品管理（免费）", "👥 模块六：电商CRM会员（免费）", "📋 模块七：全渠道订单OMS（免费）", "📈 模块八：BI数据报表（免费）"])
 
@@ -5749,7 +6069,7 @@ with tab2:
     # --- 公司信息输入 ---
     col_c1, col_c2, col_c3 = st.columns(3)
     with col_c1:
-        company_name = st.text_input("编制单位", value="", placeholder="填写公司名称")
+        company_name = st.text_input("编制单位", value=st.session_state.get("current_company_name", ""), placeholder="填写公司名称")
     with col_c2:
         report_date = st.date_input("报表出具日期", value=None)
     with col_c3:
