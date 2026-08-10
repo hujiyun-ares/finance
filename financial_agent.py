@@ -4566,17 +4566,17 @@ if not st.session_state.get("_db_initialized"):
         st.info(f"数据库模式: {'PostgreSQL' if _USE_POSTGRES else 'SQLite'} | DB_PATH: {DB_PATH}")
         st.stop()
 
-# --- 用户信息栏 ---
-_header_col1, _header_col2, _header_col3 = st.columns([5, 3, 2])
-with _header_col1:
-    st.title("💰 财务 ERP 系统")
+# --- 侧边栏：系统导航 ---
+with st.sidebar:
+    st.markdown("## 💰 财务 ERP 系统")
     _disp = st.session_state.get("display_name", "")
     _comp_name = st.session_state.get("current_company_name", "")
-    st.caption(f"离线记账 · 自动报表 · AI 智能问答 · 库存 · 商品 · CRM · 订单 · BI")
-with _header_col2:
     if _disp:
-        st.info(f"👤 {_disp}")
-    # 公司切换器
+        st.markdown(f"👤 **{_disp}**")
+
+    st.markdown("---")
+
+    # 公司切换
     _user_companies = st.session_state.get("user_companies", [])
     _current_co_code = st.session_state.get("current_company_code", "")
     if _user_companies:
@@ -4587,30 +4587,52 @@ with _header_col2:
                 _current_idx = i
                 break
         _selected_co = st.selectbox(
-            "🏢 切换公司",
+            "🏢 当前公司",
             _co_options,
             index=_current_idx,
             key="company_switcher",
-            label_visibility="collapsed",
         )
         _selected_co_code = _selected_co.split(" | ")[0] if " | " in _selected_co else _selected_co
         if _selected_co_code != _current_co_code:
-            # 切换公司：重置数据库初始化标志并刷新
             st.session_state["current_company_code"] = _selected_co_code
             st.session_state["current_company_name"] = _selected_co.split(" | ", 1)[1] if " | " in _selected_co else ""
             st.session_state["_db_initialized"] = False
             st.rerun()
-with _header_col3:
-    _col_mgmt, _col_logout = st.columns(2)
-    with _col_mgmt:
-        if st.button("🏢\n公司管理", key="company_mgmt_btn", use_container_width=True):
+
+    # 公司管理 & 退出
+    _sb_col1, _sb_col2 = st.columns(2)
+    with _sb_col1:
+        if st.button("🏢 公司管理", key="company_mgmt_btn", use_container_width=True):
             st.session_state["_show_company_mgmt"] = not st.session_state.get("_show_company_mgmt", False)
             st.rerun()
-    with _col_logout:
-        if st.button("🚪 退出", key="logout_btn", use_container_width=True):
+    with _sb_col2:
+        if st.button("🚪 退出登录", key="logout_btn", use_container_width=True):
             for k in list(st.session_state.keys()):
                 del st.session_state[k]
             st.rerun()
+
+    st.markdown("---")
+
+    # 功能导航树（参照用友/金蝶业务域分组）
+    st.markdown("### 📋 功能导航")
+    st.markdown("""
+    **💰 财务会计**
+    > 📝 记账 · 📊 报表 · 🤖 AI问答
+
+    **📦 供应链管理**
+    > 📦 库存 · 🏪 商品 · 📋 订单
+
+    **👥 客户关系**
+    > 电商CRM会员管理
+
+    **📈 数据分析**
+    > BI智能数据报表
+    """)
+    st.caption("💡 点击上方对应标签页切换业务域")
+
+# --- 主界面标题 ---
+st.title("💰 财务 ERP 系统")
+st.caption("离线记账 · 自动报表 · AI 智能问答 · 库存 · 商品 · CRM · 订单 · BI")
 
 # --- 公司管理弹窗 ---
 if st.session_state.get("_show_company_mgmt"):
@@ -4644,9 +4666,7 @@ if st.session_state.get("_show_company_mgmt"):
                 _ok, _msg = delete_company(_mg_username, _del_code)
                 if _ok:
                     st.success(_msg)
-                    # 更新 session_state
                     st.session_state["user_companies"] = get_user_companies(_mg_username)
-                    # 如果删除的是当前公司，切到默认公司
                     if _del_code == st.session_state.get("current_company_code"):
                         _remaining = st.session_state["user_companies"]
                         if _remaining:
@@ -4688,7 +4708,6 @@ if st.session_state.get("_show_company_mgmt"):
             _edit_selected = st.selectbox("选择公司", _edit_options, key="edit_company_sel")
             _edit_code = _edit_selected.split(" | ")[0] if " | " in _edit_selected else _edit_selected
 
-            # 找到当前选中公司
             _edit_co = None
             for c in _edit_companies:
                 if c["code"] == _edit_code:
@@ -4711,7 +4730,6 @@ if st.session_state.get("_show_company_mgmt"):
                                                    phone=_ed_phone.strip())
                         if _ok:
                             st.success(_msg)
-                            # 更新 session_state 中的公司名称
                             if _edit_code == st.session_state.get("current_company_code"):
                                 st.session_state["current_company_name"] = _ed_name.strip()
                             st.session_state["user_companies"] = get_user_companies(_mg_username)
@@ -4723,15 +4741,38 @@ if st.session_state.get("_show_company_mgmt"):
 
     st.markdown("---")
 
-tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs(["📝 模块一：记账（免费）", "📊 模块二：报表（免费）", "🤖 模块三：AI 问答（需 API）", "📦 模块四：库存管理（免费）", "🏪 模块五：多平台商品管理（免费）", "👥 模块六：电商CRM会员（免费）", "📋 模块七：全渠道订单OMS（免费）", "📈 模块八：BI数据报表（免费）"])
+# === 两级导航：业务域分组（对标用友U8/金蝶K3模块分区）===
+_grp_finance, _grp_supply, _grp_crm, _grp_bi = st.tabs([
+    "💰 财务会计", "📦 供应链管理", "👥 客户关系", "📈 数据分析"
+])
+
+# --- 财务会计域：记账 + 报表 + AI问答 ---
+with _grp_finance:
+    st.markdown("##### 💰 财务会计 ｜ 总账核算 · 财务报表 · AI 辅助")
+    tab1, tab2, tab3 = st.tabs(["📝 记账", "📊 报表", "🤖 AI 问答"])
+
+# --- 供应链管理域：库存 + 商品 + 订单 ---
+with _grp_supply:
+    st.markdown("##### 📦 供应链管理 ｜ 库存核算 · 商品管理 · 订单履约")
+    tab4, tab5, tab7 = st.tabs(["📦 库存管理", "🏪 多平台商品", "📋 订单 OMS"])
+
+# --- 客户关系域：CRM会员 ---
+with _grp_crm:
+    st.markdown("##### 👥 客户关系管理 ｜ 会员体系 · 积分营销")
+    tab6, = st.tabs(["👥 电商 CRM 会员"])
+
+# --- 数据分析域：BI报表 ---
+with _grp_bi:
+    st.markdown("##### 📈 数据分析 ｜ 商业智能 · 经营洞察")
+    tab8, = st.tabs(["📈 BI 数据报表"])
 
 
 # ============================================================
-# 模块一：离线记账
+# 【💰 财务会计】模块一：记账（总账核算）
 # ============================================================
 with tab1:
-    st.header("📝 离线记账")
-    st.caption("手动录入借贷分录，自动校验平衡，生成正式凭证。完全离线，无需 API。")
+    st.header("📝 总账记账")
+    st.caption("期初余额 · 录入凭证 · 凭证查询 · 明细账 · 科目管理 · 期末结转 ｜ 完全离线，无需 API")
 
     sub1, sub2, sub3, sub4, sub5, sub6 = st.tabs(["期初余额", "录入凭证", "凭证查询", "明细账", "科目管理", "🔄 期末结转"])
 
@@ -6061,10 +6102,11 @@ st.divider()
 
 
 # ============================================================
-# 模块二：离线报表
+# 【💰 财务会计】模块二：报表（财务报表）
 # ============================================================
 with tab2:
     st.header("📊 财务报表")
+    st.caption("资产负债表 · 利润表 · 现金流量表 · 财务可视化分析 ｜ 自动生成，标准格式")
 
     # --- 公司信息输入 ---
     col_c1, col_c2, col_c3 = st.columns(3)
@@ -7254,7 +7296,7 @@ st.divider()
 
 
 # ============================================================
-# 模块三：AI 智能问答（需要 API）
+# 【💰 财务会计】模块三：AI 智能问答（需要 API）
 # ============================================================
 with tab3:
     st.header("🤖 AI 智能问答")
@@ -7582,11 +7624,11 @@ with tab3:
 
 
 # ============================================================
-# 模块四：库存管理（离线，免费）
+# 【📦 供应链管理】模块四：库存管理（仓存核算）
 # ============================================================
 with tab4:
-    st.header("📦 库存管理")
-    st.caption("管理产成品档案、记录出入库、自动与「库存商品」科目挂钩并生成凭证。完全离线，无需 API。")
+    st.header("📦 仓存管理")
+    st.caption("产成品档案 · 出入库记录 · 自动挂钩「库存商品」科目生成凭证 ｜ 完全离线")
 
     sub_inv1, sub_inv2, sub_inv3, sub_inv4 = st.tabs(["产品档案", "入库管理", "出库管理", "库存查询"])
 
@@ -7931,12 +7973,12 @@ with tab4:
 
 
 # ============================================================
-# 模块五：多平台商品管理（离线，免费）
+# 【📦 供应链管理】模块五：多平台商品管理（商品档案）
 # ============================================================
 with tab5:
-    st.header("🏪 多平台商品管理")
+    st.header("🏪 商品档案管理")
     st.caption(
-        "管理 SPU/SKU 主数据、平台店铺、一品多商绑定、BOM 物料清单、分类标签，支持 Excel 批量导入导出。"
+        "SPU/SKU 主数据 · 平台店铺 · 一品多商绑定 · BOM 物料清单 · 分类标签 ｜ 支持 Excel 批量导入导出"
     )
 
     # ---------- 公共选项 ----------
@@ -8506,11 +8548,11 @@ with tab5:
 
 
 # ============================================================
-# 模块六：电商CRM会员
+# 【👥 客户关系】模块六：电商CRM会员管理
 # ============================================================
 with tab6:
-    st.header("👥 电商CRM会员")
-    st.caption("全平台会员数据聚合：会员档案、平台账号、等级体系、消费记录、积分、标签与黑名单管理。")
+    st.header("👥 电商 CRM 会员管理")
+    st.caption("会员档案 · 平台账号 · 等级体系 · 消费记录 · 积分 · 标签与黑名单管理")
 
     M6_PLATFORMS = ["淘宝", "拼多多", "抖音", "视频号", "京东", "快手"]
     M6_GENDERS = ["男", "女", "未知"]
@@ -9280,12 +9322,12 @@ with tab6:
 
 
 # ============================================================
-# 模块七：全渠道订单OMS
+# 【📦 供应链管理】模块七：全渠道订单OMS（订单履约）
 # ============================================================
 with tab7:
     import plotly.express as px
-    st.header("📋 全渠道订单OMS")
-    st.caption("全渠道订单管理：订单录入、智能审核、合并拆分、打单发货、异常拦截、物流同步与统计看板。")
+    st.header("📋 订单履约 OMS")
+    st.caption("订单录入 · 智能审核 · 合并拆分 · 打单发货 · 异常拦截 · 物流同步 · 统计看板")
 
     # 初始化预置物流公司（仅首次运行）
     if not st.session_state.get("_preset_logistics_done"):
@@ -9948,7 +9990,7 @@ with tab7:
 
 
 # ============================================================
-# 模块八：BI 数据报表
+# 【📈 数据分析】模块八：BI 数据报表（商业智能）
 # ============================================================
 with tab8:
     import plotly.express as px
@@ -9956,8 +9998,8 @@ with tab8:
     from io import BytesIO
     from datetime import date, timedelta
 
-    st.header("📈 BI 数据报表")
-    st.caption("电商经营全维度数据分析：经营总览、店铺分析、商品销售、库存周转、售后分析、综合报表导出。完全离线，无需 API。")
+    st.header("📈 BI 智能数据报表")
+    st.caption("经营总览 · 店铺分析 · 商品销售 · 库存周转 · 售后分析 · 综合报表导出 ｜ 完全离线")
 
     def _bi_date_filter(prefix):
         """渲染日期范围筛选器，返回 (date_from_str, date_to_str)"""
