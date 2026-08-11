@@ -196,7 +196,11 @@ if _USE_POSTGRES:
             self._row_factory = None
 
             cur = self._conn.cursor()
-            cur.execute(f"CREATE SCHEMA IF NOT EXISTS {self._schema}")
+            # 防止并发 CREATE SCHEMA 导致 UniqueViolation
+            try:
+                cur.execute(f"CREATE SCHEMA IF NOT EXISTS {self._schema}")
+            except Exception:
+                pass  # schema 已存在或并发冲突，忽略
             cur.execute(f"SET search_path TO {self._schema}")
             cur.close()
 
