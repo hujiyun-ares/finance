@@ -536,53 +536,48 @@ def login_page():
     tab_login, tab_register = st.tabs(["🔐 登录", "📝 注册"])
 
     with tab_login:
-        with st.form("login_form"):
-            username = st.text_input("用户名", key="login_user")
-            password = st.text_input("密码", type="password", key="login_pwd")
-            submitted = st.form_submit_button("登录")
-
-            if submitted:
-                if not username or not password:
-                    st.error("请输入用户名和密码")
+        # 不使用 st.form，避免在 st.tabs 内密码框无法输入的问题
+        username = st.text_input("用户名", key="login_user")
+        password = st.text_input("密码", type="password", key="login_pwd")
+        if st.button("登录", key="login_btn", use_container_width=True):
+            if not username or not password:
+                st.error("请输入用户名和密码")
+            else:
+                success, result = verify_user(username, password)
+                if success:
+                    st.session_state["logged_in"] = True
+                    st.session_state["username"] = username
+                    st.session_state["display_name"] = result["display_name"]
+                    st.session_state["company"] = result["company"]
+                    st.session_state["user_companies"] = result.get("companies", [])
+                    # 自动选择默认公司
+                    if result.get("companies"):
+                        default_co = result["companies"][0]
+                        st.session_state["current_company_code"] = default_co["code"]
+                        st.session_state["current_company_name"] = default_co["name"]
+                    st.rerun()
                 else:
-                    success, result = verify_user(username, password)
-                    if success:
-                        st.session_state["logged_in"] = True
-                        st.session_state["username"] = username
-                        st.session_state["display_name"] = result["display_name"]
-                        st.session_state["company"] = result["company"]
-                        st.session_state["user_companies"] = result.get("companies", [])
-                        # 自动选择默认公司
-                        if result.get("companies"):
-                            default_co = result["companies"][0]
-                            st.session_state["current_company_code"] = default_co["code"]
-                            st.session_state["current_company_name"] = default_co["name"]
-                        st.rerun()
-                    else:
-                        st.error(result)
+                    st.error(result)
 
     with tab_register:
-        with st.form("register_form"):
-            reg_user = st.text_input("设置用户名 *", key="reg_user", placeholder="字母或数字，如：admin")
-            reg_pwd = st.text_input("设置密码 *", type="password", key="reg_pwd")
-            reg_pwd2 = st.text_input("确认密码 *", type="password", key="reg_pwd2")
-            reg_name = st.text_input("显示名称", key="reg_name", placeholder="如：张三")
-            reg_company = st.text_input("公司名称", key="reg_company", placeholder="如：XX电子商务有限公司")
-            reg_submitted = st.form_submit_button("注册")
-
-            if reg_submitted:
-                if not reg_user or not reg_pwd:
-                    st.error("用户名和密码不能为空")
-                elif reg_pwd != reg_pwd2:
-                    st.error("两次输入的密码不一致")
-                elif len(reg_pwd) < 4:
-                    st.error("密码至少4位")
+        reg_user = st.text_input("设置用户名 *", key="reg_user", placeholder="字母或数字，如：admin")
+        reg_pwd = st.text_input("设置密码 *", type="password", key="reg_pwd")
+        reg_pwd2 = st.text_input("确认密码 *", type="password", key="reg_pwd2")
+        reg_name = st.text_input("显示名称", key="reg_name", placeholder="如：张三")
+        reg_company = st.text_input("公司名称", key="reg_company", placeholder="如：XX电子商务有限公司")
+        if st.button("注册", key="reg_btn", use_container_width=True):
+            if not reg_user or not reg_pwd:
+                st.error("用户名和密码不能为空")
+            elif reg_pwd != reg_pwd2:
+                st.error("两次输入的密码不一致")
+            elif len(reg_pwd) < 4:
+                st.error("密码至少4位")
+            else:
+                success, msg = register_user(reg_user, reg_pwd, reg_name or reg_user, reg_company)
+                if success:
+                    st.success("注册成功！请切换到「登录」标签登录。")
                 else:
-                    success, msg = register_user(reg_user, reg_pwd, reg_name or reg_user, reg_company)
-                    if success:
-                        st.success("注册成功！请切换到「登录」标签登录。")
-                    else:
-                        st.error(msg)
+                    st.error(msg)
 
     st.markdown("---")
     st.caption("一个账号可管理多家公司，每家公司拥有独立的财务数据库。")
